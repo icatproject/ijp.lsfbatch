@@ -1,0 +1,13 @@
+# Driver and connection properties for Oracle
+driver=oracle.jdbc.pool.OracleDataSource
+dbProperties=url="'"jdbc:oracle:thin:@//lcgdb02-vip.gridpp.rl.ac.uk:1521/orisa.gridpp.rl.ac.uk"'":ImplicitCachingEnabled=true:MaxStatements=200:user=icatportal:password=tr$iE8xRz6TLUyw
+
+# Driver and connection properties for MySQL
+#driver=com.mysql.jdbc.jdbc2.optional.MysqlDataSource
+#dbProperties=user=icat:password=secret:databaseName=ijp
+
+# Glassfish home, must contain "glassfish/domains"
+glassfish=/home/escg/glassfish/glassfish4
+
+# Glassfish admin port (normally 4848)
+port=4848

@@ -1,0 +1,56 @@
+#!/usr/bin/env python
+from setup_utils import *
+import os
+import socket
+
+# lsfbatch
+
+def uninstall():
+    app = actions.getAppName("ijp.lsfbatch")
+    if app: actions.asadmin("undeploy " + app)
+    actions.asadmin("delete-jdbc-resource jdbc/lsfbatch", tolerant=True)
+    actions.asadmin("delete-jdbc-connection-pool lsfbatch", tolerant=True)
+    
+actions, options, arg = getActions()
+props = actions.getGlassfish("lsfbatch-setup.properties", ["dbProperties", "glassfish", "driver", "port"])
+
+prop_name = "lsfbatch.properties"
+prop_list = ["icat.url", "families.list", "jobOutputDir"]
+
+if arg in ["CONFIGURE", "INSTALL"]:
+    actions.configure(prop_name, prop_list) 
+    lsfbatchProperties = actions.getProperties(prop_name, prop_list)
+    actions.checkNoErrors()
+    if not actions.configFileExists(lsfbatchProperties.get("jobOutputDir")):
+        abort("Please create directory " + lsfbatchProperties.get("jobOutputDir") + 
+               " relative to the config directory as specified in lsfbatch.properties")
+
+
+if arg == "INSTALL":
+    actions.installFile(prop_name)
+    
+    try:           
+        uninstall()
+        
+        actions.asadmin('create-jdbc-connection-pool --datasourceclassname ' + props["driver"] + 
+                ' --restype javax.sql.DataSource --failconnection=true --steadypoolsize 2' + 
+                ' --maxpoolsize 32 --ping --property ' + props["dbProperties"] + ' lsfbatch', printOutput=True)
+        
+        actions.asadmin("create-jdbc-resource --connectionpoolid lsfbatch jdbc/lsfbatch")
+            
+        actions.deploy("ijp.lsfbatch-*.war", deploymentorder=130)
+               
+    except Exception, e:
+        abort(str(e))
+                
+if arg == "UNINSTALL":
+    lsfbatchProperties = actions.getProperties(prop_name, prop_list)   
+    actions.removeFile(prop_name)
+ 
+    try:
+        uninstall()
+    except Exception, e:
+        abort(str(e))       
+    
+            
+    

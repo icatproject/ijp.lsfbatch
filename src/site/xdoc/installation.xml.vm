@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document xmlns="http://maven.apache.org/XDOC/2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/XDOC/2.0 http://maven.apache.org/xsd/xdoc-2.0.xsd">
+
+    <properties>
+        <title>Installation</title>
+    </properties>
+
+    <body>
+
+        <section name="Installation">
+
+            <subsection name="Compatibility">This authentication plugin will work with an ICAT version of 4.2 or greater.</subsection>
+
+            <subsection name="Prerequisites">
+
+                <ul>
+                    <li>
+                        The ijp.lsfbatch distribution:
+                        <a href="${repoUrl}/org/icatproject/ijp.lsfbatch/${project.version}/ijp.lsfbatch-${project.version}-distro.zip">ijp.lsfbatch-${project.version}-distro.zip</a>
+                    </li>
+                    <li>
+                        A suitable deployed container. The installation scripts only support Glassfish.
+                        Testing has been carried out with Glassfish
+                        4.0.
+                        <a href="http://icatproject.org/installation/glassfish/">Glassfish installation instructions</a>
+                        are available.
+                    </li>
+                    <li>
+                        A database as described in
+                        <a href="http://icatproject.org/installation/database/">Database installation instructions</a>
+                        installed on the server
+                    </li>
+
+                    <li>
+                        Python (version 2.4 to 2.7) installed on the server.
+                    </li>
+                </ul>
+            </subsection>
+
+            <subsection name="Summary of steps">
+                <ol>
+                    <li>
+                        Please follow
+                        <a href="http://icatproject.org/installation/component/"> the generic installation instructions</a>
+                    </li>
+                </ol>
+            </subsection>
+
+            <subsection name="The lsfbatch-setup.properties file">
+
+                <dl>
+                    <dt>driver</dt>
+                    <dd>is the name of the jdbc driver and must match the jar file for your database that you stored in the previous step.</dd>
+                    <dt>dbProperties</dt>
+                    <dd>identifies the password database and how to connect to it.</dd>
+                    <dt>glassfish</dt>
+                    <dd>is the top level of the glassfish installation. It must contain "glassfish/domains", and will be referred to here as
+                        GLASSFISH_HOME as if an environment variable had been set.
+                    </dd>
+                    <dt>port</dt>
+                    <dd>is the administration port of the chosen glassfish domain which is typically 4848.</dd>
+                </dl>
+
+            </subsection>
+
+            <subsection name="The lsfbatch.properties file">
+
+                <dl>
+                    <dt>icat.url</dt>
+                    <dd>The URL of the ICAT that will be used by the IJP.
+                    </dd>
+
+                    <dt>families.list</dt>
+                    <dd>space separated list of families. There must be at least one. The first one will be used as the default family. A family
+                        defines a list of pool accounts. For each one there must be a families.&lt;name&gt; entry to define the list of pool accounts.
+                    </dd>
+
+                    <dt>families.&lt;name&gt;</dt>
+                    <dd>Space separated list of pool accounts. Each pool account should be set up without password or ssh keys as it is only for use
+                        by this service. The glassfish user should be permitted to run batch, atq and atrm for all pool accounts.
+                    </dd>
+
+                    <dt>jobOutputDir</dt>
+                    <dd>
+                        The name of a directory to which glassfish can write and which can be read by the pool accounts. This is used to hold job
+                        output.
+                    </dd>
+                </dl>
+
+            </subsection>
+
+            <subsection name="Checking that it works">
+                <p>The program ijpbatch can be used to test for correct functioning of any ijp batch component.</p>
+            </subsection>
+
+
+
+        </section>
+    </body>
+</document>
+			
