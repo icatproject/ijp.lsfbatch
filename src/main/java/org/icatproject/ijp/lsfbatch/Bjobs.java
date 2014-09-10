@@ -99,6 +99,7 @@ public class Bjobs {
 		// 157356  scarf334 DONE  scarf      ui3.scarf.rl.ac.uk cn223.scarf.rl.ac.uk test-batchfile Aug  5 14:34
 		//
 		// If no jobs are found, the output is the single line "No job found".  Or sometimes "No unfinished job found" (if -a is not specified)
+		// However, it transpires that this is appearing on stderr, not stdout!  Empty stdout should still be OK.
 		//
 		// Notes:
 		// - the submit time does not specify the year!  Resulting Dates will be in 1970; we set the current year from Calendar

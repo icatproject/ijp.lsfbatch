@@ -12,14 +12,17 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -60,8 +63,11 @@ public class JobManagementBean {
 	private Map<String, List<String>> families = new HashMap<>();
 	private LsfUserPool lsfUserPool;
 
-	private Path jobOutputDir;
+	private Path batchFileDir;
 
+	// per-LSF user subdirectory used to hold job-specific directories
+	
+	private final static String lsfUserOutputDir = "jobsOutput";
 	private final static String chars = "abcdefghijklmnpqrstuvwxyz";
 
 	@PostConstruct
@@ -87,14 +93,6 @@ public class JobManagementBean {
 				throw new IllegalStateException(msg);
 			}
 
-			jobOutputDir = props.getPath("jobOutputDir");
-			if (!jobOutputDir.toFile().exists()) {
-				String msg = "jobOutputDir " + jobOutputDir + "does not exist";
-				logger.error(msg);
-				throw new IllegalStateException(msg);
-			}
-			jobOutputDir = jobOutputDir.toAbsolutePath();
-			
 			lsfUserPool = LsfUserPool.getInstance();
 			for( String family : families.keySet() ){
 				for( String lsfUserId : families.get(family) ){
@@ -111,6 +109,14 @@ public class JobManagementBean {
 					lsfUserPool.addLsfUser(family, lsfUserId, isAssigned);
 				}
 			}
+
+			batchFileDir = props.getPath("batchFileDir");
+			if (!batchFileDir.toFile().exists()) {
+				String msg = "jobOutputDir " + batchFileDir + "does not exist";
+				logger.error(msg);
+				throw new IllegalStateException(msg);
+			}
+			batchFileDir = batchFileDir.toAbsolutePath();
 
 			if (props.has("javax.net.ssl.trustStore")) {
 				System.setProperty("javax.net.ssl.trustStore",
@@ -143,18 +149,25 @@ public class JobManagementBean {
 
 			// Need to run bjobs for *each* (active) user in the pool; glassfish user should be able to do this, no need for ssh
 			
+			List<String> activePoolUsers = getActivePoolUsers();
+			logger.debug("Active pool users: " + activePoolUsers );
+			
 			for( String poolUserId : getActivePoolUsers() ){
 			
 				ShellCommand sc = new ShellCommand("bjobs", "-aw", "-u", poolUserId );
 				if (sc.isError()) {
-					throw new InternalException("Unable to query jobs via bjobs " + sc.getStderr());
+					// Astonishingly, "No job found" counts as an error!
+					if( ! ("No job found".equals(sc.getStderr().trim())) ){
+						throw new InternalException("Unable to query jobs via bjobs: " + sc.getStderr());
+					}
 				}
 				String bJobsOutput = sc.getStdout().trim();
 				if (bJobsOutput.isEmpty()) {
 					// See if any jobs have completed without being noticed
 					// In practice, bjobs output is unlikely to be empty; but may be "No jobs found" or similar
+					// (but that may be on stderr, see above)
 					cleanUpJobs( poolUserId );
-					return;
+					continue;
 				}
 	
 				Bjobs bJobs = new Bjobs( bJobsOutput );
@@ -162,7 +175,7 @@ public class JobManagementBean {
 				if( jobs.size() == 0 ){
 					// No jobs found for this pool user, so see if we missed any becoming Completed
 					cleanUpJobs( poolUserId );
-					return;
+					continue;
 				}
 				
 				// Even if we do have some Bjobs, they might all be Completed,
@@ -204,7 +217,7 @@ public class JobManagementBean {
 		} catch (Exception e) {
 			ByteArrayOutputStream baos = new ByteArrayOutputStream();
 			e.printStackTrace(new PrintStream(baos));
-			logger.error("Update of db jobs from bjobs failed. Class " + e.getClass() + " reports "
+			logger.error("Update of db jobs from bjobs failed (exception caught here). Class " + e.getClass() + " reports "
 					+ e.getMessage() + baos.toString());
 		}
 	}
@@ -226,7 +239,10 @@ public class JobManagementBean {
 				job.setStatus("Completed");
 			}
 		}
+		
 		// And free up this userid back to the pool
+	    // TODO What about any output from old jobs? Should it be (a) deleted or (b) moved to a safe place away from the poolUser?
+		
 		logger.debug("Userid " + poolUserId + " has no uncompleted jobs, so releasing it back to the pool (in cleanUpJobs)");
 		lsfUserPool.freeUser(poolUserId);
 	}
@@ -244,9 +260,11 @@ public class JobManagementBean {
 
 		String jobFilename = job.getId() + "." + (outputType == OutputType.STANDARD_OUTPUT ? "log" : "err");
 		
-		Path path = jobOutputDir.resolve(job.getDirectory()).resolve(jobFilename);
+		// Path path = jobOutputDir.resolve(job.getDirectory()).resolve(jobFilename);
 
-		boolean delete = false;
+		Path outputParentPath = getUserJobsOutputPath( job.getBatchUsername() );
+		Path path = outputParentPath.resolve(job.getDirectory()).resolve(jobFilename);
+
 		if (!Files.exists(path)) {
 			logger.debug("No " + outputType + " output (yet?) for job" + jobId);
 			
@@ -283,24 +301,30 @@ public class JobManagementBean {
 			} catch (IOException e) {
 				throw new InternalException(e.getClass() + " reports " + e.getMessage());
 			}
-			if (delete) {
-				
-				// Not sure this is a good thing to do!
-				// Original (R92) code copied file contents to a String and returned that,
-				// but the new version requires an InputStream.  Perhaps create a stream
-				// from the string of the file contents?
-				
-				try {
-					Files.deleteIfExists(path);
-				} catch (IOException e) {
-					throw new InternalException("Unable to delete temporary file");
-				}
-			}
 			return is;
 
 		} else {
 			throw new InternalException("No output file available at the moment");
 		}
+	}
+
+	private Path getUserJobsOutputPath(String batchUsername) throws InternalException {
+		String userBase = Constants.SCARF_POOL_BASE;
+		
+		Path outputParentPath = Paths.get(userBase).resolve(batchUsername).resolve(lsfUserOutputDir);
+		if( !Files.exists(outputParentPath)){
+			createUserJobsOutputDir( batchUsername );
+			outputParentPath = Paths.get(userBase).resolve(batchUsername).resolve(lsfUserOutputDir);
+		}
+		return outputParentPath;
+	}
+
+	private void createUserJobsOutputDir(String batchUsername) throws InternalException {
+		ShellCommand sc = new ShellCommand("ssh", "-i", getSshIdFileNameFor(batchUsername), batchUsername + "@localhost", "mkdir", lsfUserOutputDir);
+		if (sc.isError()) {
+			throw new InternalException("Unable to create jobs output folder for user " + batchUsername + ": " + sc.getStderr());
+		}
+		
 	}
 
 	public String submitBatch(String userName, String executable, List<String> parameters,
@@ -323,26 +347,14 @@ public class JobManagementBean {
 		
 		String jobName = executable;
 		
-		// Create a temporary directory for the batch file and (final) output files
+		// Create a temporary directory for the (final) output files
 
-		Path dir = null;
-		try {
-			dir = Files.createTempDirectory(jobOutputDir, null);
-			ShellCommand sc = new ShellCommand("setfacl", "-m", "user:" + owner + ":rwx",
-					dir.toString());
-			if (sc.getExitValue() != 0) {
-				throw new InternalException(sc.getMessage() + ". Check that user '" + owner
-						+ "' exists");
-			}
-		} catch (IOException e) {
-			throw new InternalException("Unable to submit job via batch " + e.getClass() + " "
-					+ e.getMessage());
-		}
+		Path userJobsOutputPath = getUserJobsOutputPath(owner);
 
+		String jobDirectoryName = createJobOutputDirectory(userJobsOutputPath, owner);
+		
 		/*
-		 * The batch script needs to be written to disk by the dmf user (running glassfish) before
-		 * it can be submitted via the qsub command as a less privileged batch user. First generate
-		 * a unique name for it.
+		 * The batch script is owned by glassfish, but should be readable by the LSF users.
 		 */
 		File batchScriptFile = null;
 		do {
@@ -351,14 +363,14 @@ public class JobManagementBean {
 				pw[i] = chars.charAt(random.nextInt(chars.length()));
 			}
 			String batchScriptName = new String(pw) + ".sh";
-			batchScriptFile = new File(dir.toString(), batchScriptName);
+			batchScriptFile = new File(batchFileDir.toString(), batchScriptName);
 		} while (batchScriptFile.exists());
 
 		createScript(batchScriptFile, jobName, executable, parameters);
 		
 		// Ask bsub to write log files to our temp directory; we need the absolute path
 		
-		String dirStr = dir.toString() + File.separator;
+		String dirStr = userJobsOutputPath.toString() + File.separator + jobDirectoryName + File.separator;
 		
 		ShellCommand sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bsub", "-J", jobName, "-o", dirStr+"%J.log", "-e", dirStr+"%J.err", "-q", queueName,
 				batchScriptFile.getAbsolutePath());
@@ -376,7 +388,7 @@ public class JobManagementBean {
 		job.setExecutable(executable);
 		job.setBatchUsername(owner);
 		job.setBatchfileName(batchScriptFile.getAbsolutePath());
-		job.setDirectory(dir.getFileName().toString());
+		job.setDirectory(jobDirectoryName);
 		job.setUsername(userName);
 		job.setSubmitDate(new Date());
 		
@@ -389,8 +401,39 @@ public class JobManagementBean {
 
 	}
 
+	private String createJobOutputDirectory(Path userJobsOutputPath, String owner) throws InternalException {
+		String jobDirectoryName;
+		File jobDirectory = null;
+		do {
+			// Generate a random name, but redo if it does already exist
+			char[] pw = new char[10];
+			for (int i = 0; i < pw.length; i++) {
+				pw[i] = chars.charAt(random.nextInt(chars.length()));
+			}
+			jobDirectoryName = new String(pw);
+			jobDirectory = new File(userJobsOutputPath.toString(), jobDirectoryName);
+		} while (jobDirectory.exists());
+		
+		// Now, we have to create the folder
+		
+		ShellCommand sc = new ShellCommand("ssh", "-i", getSshIdFileNameFor(owner), owner + "@localhost", "mkdir", jobDirectory.getAbsolutePath());
+		if (sc.isError()) {
+			throw new InternalException("Unable to create job output folder for user " + owner + ": " + sc.getStderr());
+		}
+		
+		// The job directory name is all we need now.
+		
+		return jobDirectoryName;
+	}
+
 	private String getSshIdFileNameFor(String owner) {
-		return "$HOME/.ssh/id_rsa_" + owner;
+		
+		// Looks like this has to be an absolute path
+		
+		String userBase = Constants.SCARF_POOL_BASE;
+		
+		Path sshIdPath = Paths.get(userBase).resolve("glassfish").resolve(".ssh").resolve("id_rsa_"+owner);
+		return sshIdPath.toString();
 	}
 
 	/**
@@ -411,8 +454,8 @@ public class JobManagementBean {
 		 * bsub output format is "LsfJob <jobId> is submitted to queue <queueName>.",
 		 * (including the angle brackets).
 		 */
-		Pattern p = Pattern.compile("LsfJob <(\\d+)> is submitted to queue <(\\w+)>.");
-		Matcher m = p.matcher(stdout);
+		Pattern p = Pattern.compile("Job <(\\d+)> is submitted to queue <(.+)>\\.");
+		Matcher m = p.matcher(stdout.trim());
 		if( ! m.matches() ){
 			logger.debug("Unable to get JobId for submitted job: bsub output was: " + stdout);
 			throw new InternalException("Unable to get JobId for submitted job");
@@ -450,7 +493,30 @@ public class JobManagementBean {
 				}
 			}
 		}
-		batchScriptFile.setExecutable(true);
+		// File.setExecutable() only does it for the current user, we need it to be globally executable
+		// batchScriptFile.setExecutable(true);
+		setFileGloballyExecutable(batchScriptFile);
+	}
+	
+	private void setFileGloballyExecutable(File file) throws InternalException{
+		
+		Set<PosixFilePermission> perms = new HashSet<PosixFilePermission>();
+        //add owners permission
+        perms.add(PosixFilePermission.OWNER_READ);
+        perms.add(PosixFilePermission.OWNER_WRITE);
+        perms.add(PosixFilePermission.OWNER_EXECUTE);
+        //add group permissions
+        perms.add(PosixFilePermission.GROUP_READ);
+        perms.add(PosixFilePermission.GROUP_EXECUTE);
+        //add others permissions
+        perms.add(PosixFilePermission.OTHERS_READ);
+        perms.add(PosixFilePermission.OTHERS_EXECUTE);
+		try {
+			Files.setPosixFilePermissions(file.toPath(), perms);
+		} catch (IOException e) {
+			throw new InternalException("Unable to set permissions on batch script: " + e.getMessage() );
+		}
+		
 	}
 
 	private void writeln(BufferedWriter bw, String string) throws IOException {
@@ -586,8 +652,11 @@ public class JobManagementBean {
 
 		ShellCommand sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bjobs", "-aw", jobId);
 		if (sc.isError()) {
-			throw new InternalException("Unable to query job (id " + jobId
-					+ ") via bjobs: " + sc.getStderr());
+			// Astonishingly, "No job found" counts as an error!
+			if( ! "No job found".equals(sc.getStderr())){
+				throw new InternalException("Unable to query job (id " + jobId
+						+ ") via bjobs: " + sc.getStderr());
+			}
 		}
 		
 		Bjobs bjobs = new Bjobs( sc.getStdout() );
@@ -676,7 +745,15 @@ public class JobManagementBean {
 		lsfUserPool.freeUser(owner);
 
 		try {
-			Path dir = jobOutputDir.resolve(job.getDirectory());
+			Path dir = getUserJobsOutputPath(owner).resolve(job.getDirectory());
+			
+			// And get the owner to remove everything under there.
+			
+			sc = new ShellCommand("ssh", "-i", getSshIdFileNameFor(owner), owner + "@localhost", "rm", "-rf", dir.toString());
+			if (sc.isError()) {
+				throw new InternalException("Unable to delete job output folder for user " + owner + ": " + sc.getStderr());
+			}
+						
 			File[] files = dir.toFile().listFiles();
 			if (files != null) {
 				for (File f : dir.toFile().listFiles()) {
