@@ -1,10 +1,10 @@
 package org.icatproject.ijp.lsfbatch;
 
 import java.io.BufferedWriter;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileWriter;
-import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
@@ -360,13 +360,11 @@ public class JobManagementBean {
 		 * The location of the output files depends on the (real) status of the job (which we might not know).
 		 * It's possible that other threads may change the job status (and spot the change)
 		 * between testing and attempting to read.  To play safe, it is better just to look for the
-		 * files in each location in turn: 
+		 * files in each location in turn (where the suffix is chosen depending on the outputType parameter):
 		 *
-		 *   1. in <poolUser>/.lsbatch/*.<jobid>.{err|out} (used during job execution, removed by LSF on completion)
+		 *   1. in <poolUser>/.lsbatch/*.<jobid>.{out|err} (used during job execution, removed by LSF on completion)
 		 *   2. in <poolUser>/<jobOutputDir>/<jobid>.{log|err} (created by LSF on completion)
 		 *   3. in <glassfishArea>/<jobid>/<jobid>.{log|err} (moved by updateJobs here when it spots the job has completed)
-		 *   
-		 * TODO At present, the code still tests job status first; also glassfish can't read <poolUser>/.lsbatch
 		 */
 		
 		logger.info("getJobOutput called with sessionId:" + sessionId + " jobId:" + jobId
@@ -375,65 +373,41 @@ public class JobManagementBean {
 		InputStream is;
 
 		String jobFilename = job.getId() + "." + (outputType == OutputType.STANDARD_OUTPUT ? "log" : "err");
+		String batchUser = job.getBatchUsername();
 		
-		// Path path = jobOutputDir.resolve(job.getDirectory()).resolve(jobFilename);
+		logger.debug("Looking for mid-execution temporary output files first...");
 		
-		Path path;
+		String userBase = Constants.SCARF_POOL_BASE;
+		Path batchFolder = Paths.get(userBase).resolve(batchUser)
+				.resolve(".lsbatch");
+
+		logger.debug("Batch folder to look in: " + batchFolder.toString());
+
+		// use ssh <poolUser> to get the output file, if it exists - glassfish has no read access
 		
-		if( JOBSTATUS_COMPLETED.equals(job.getStatus())){
+		final String outputFilePattern =  batchFolder.toString() + File.separator + "*." + jobId + "."
+				+ (outputType == OutputType.STANDARD_OUTPUT ? "out" : "err");
+		
+		ShellCommand sc = new ShellCommand( "ssh", "-i", getSshIdFileNameFor(batchUser), batchUser + "@localhost", "cat", outputFilePattern );
+		if( ! sc.isError() ){
 			
-			// Output files should have been moved to the Glassfish output area
+			logger.debug("Temp file cat succeeded, so treat output as result");
+			return new ByteArrayInputStream(sc.getStdout().getBytes());
+		}
+		
+		logger.debug("Temp file not found; looking for pool user output file...");
+		
+		Path outputParentPath = getUserJobsOutputPath( batchUser );
+		Path path = outputParentPath.resolve(job.getDirectory()).resolve(jobFilename);
+
+		if (!Files.exists(path)) {
 			
-			logger.debug("Job has completed, so expect output files to be in glassfish area");
+			logger.debug("Pool user output file not found, so looking in glassfish area");
 			
 			Path glassfishAreaPath = getGlassfishOutputAreaFor( job );
 			path = glassfishAreaPath.resolve(jobFilename);
-			
-		} else {
-			
-			// It's possible that the job has Completed but we don't know it yet,
-			// so look in the batchUsername's output area first.
-
-			logger.debug("Job has not (knowingly) completed, but look for pool user output files anyway");
-			
-			Path outputParentPath = getUserJobsOutputPath( job.getBatchUsername() );
-			path = outputParentPath.resolve(job.getDirectory()).resolve(jobFilename);
-	
-			if (!Files.exists(path)) {
-				logger.debug("No " + outputType + " output (yet?) for job" + jobId + "; try looking for bsub's temp files");
-				
-				// In theory, we could use bpeek to get output of running job
-				// However, bpeek output is not that useful (it concatenates stdout and stderr, albeit with markers).
-				// Alternatively, bsub *appears* to use ~/.lsbatch/[0-9]*.<jobId>.{err,out,hostfile} to hold stdout/stderr during execution, and
-				// these may be more useful to us.
-				// These files are removed when the job completes; but in that case, the pool user output files (above) *should* exist.
-				
-				String userBase = Constants.SCARF_POOL_BASE;
-				Path batchFolder = Paths.get(userBase).resolve(job.getBatchUsername()).resolve(".lsbatch");
-				
-				logger.debug("Batch folder to look in: " + batchFolder.toString());
-				
-				final String outputFileEnding = jobId + "." + (outputType == OutputType.STANDARD_OUTPUT ? "out" : "err");
-				File [] files = batchFolder.toFile().listFiles(new FilenameFilter() {
-				    @Override
-				    public boolean accept(File dir, String name) {
-				        return name.endsWith(outputFileEnding);
-				    }
-				});
-				
-				if( files != null && files.length > 0 ){
-					
-					path = (files[0]).toPath();
-					
-				} else {
-					
-					logger.debug("No bsub temp files found");
-					
-					throw new ParameterException("No output file of type " + outputType
-							+ " available at the moment");
-				}
-			}
 		}
+
 		if (Files.exists(path)) {
 			logger.debug("Try to create stream for " + path.toString() );
 			try {
