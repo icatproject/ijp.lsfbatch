@@ -56,6 +56,14 @@ public class JobManagementBean {
 	public enum OutputType {
 		STANDARD_OUTPUT, ERROR_OUTPUT;
 	}
+	
+	// TODO Replace static strings with ijp.batch.JobStatus values
+	
+	private static String JOBSTATUS_QUEUED = "Queued";
+	private static String JOBSTATUS_COMPLETED = "Completed";
+	private static String JOBSTATUS_EXECUTING = "Executing";
+	private static String JOBSTATUS_HELD = "Held";
+	private static String JOBSTATUS_UNKNOWN = "Unknown";
 
 	private ICAT icat;
 
@@ -63,7 +71,7 @@ public class JobManagementBean {
 	private Map<String, List<String>> families = new HashMap<>();
 	private LsfUserPool lsfUserPool;
 
-	private Path batchFileDir;
+	private Path jobOutputDir;
 
 	// per-LSF user subdirectory used to hold job-specific directories
 	
@@ -101,7 +109,7 @@ public class JobManagementBean {
 					for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 							.setParameter("batchusername", lsfUserId).getResultList()) {
 						String status = job.getStatus();
-						if( status != null && ! status.equals("Completed") ){
+						if( status != null && ! status.equals(JOBSTATUS_COMPLETED) ){
 							isAssigned = true;
 						}
 					}
@@ -110,13 +118,13 @@ public class JobManagementBean {
 				}
 			}
 
-			batchFileDir = props.getPath("batchFileDir");
-			if (!batchFileDir.toFile().exists()) {
-				String msg = "jobOutputDir " + batchFileDir + "does not exist";
+			jobOutputDir = props.getPath("jobOutputDir");
+			if (!jobOutputDir.toFile().exists()) {
+				String msg = "jobOutputDir " + jobOutputDir + "does not exist";
 				logger.error(msg);
 				throw new IllegalStateException(msg);
 			}
-			batchFileDir = batchFileDir.toAbsolutePath();
+			jobOutputDir = jobOutputDir.toAbsolutePath();
 
 			if (props.has("javax.net.ssl.trustStore")) {
 				System.setProperty("javax.net.ssl.trustStore",
@@ -143,6 +151,16 @@ public class JobManagementBean {
 	@PersistenceContext(unitName = "lsfbatch")
 	private EntityManager entityManager;
 
+	/**
+	 * updateJobsFromBjobs() is a scheduled method (every minute) to update the status of all known jobs for each LSF pool user.
+	 * For a particular pool user, if bjobs returns no jobs, or if all jobs now have status Completed, the pool user is
+	 * released back to the pool (this may be a no-op as they may already be released).  At this point, any jobs with
+	 * status other than Completed will be assumed Completed (as they are no longer appearing in the bjobs output).
+	 * Additionally, if any job's status changes to Completed, the job's output is moved from the pool user account to the
+	 * glassfish holding area.
+	 * As this is a scheduled method, any exceptions that may be raised from execution of bjobs, file moves or cleanups
+	 * will be caught and (merely) logged.
+	 */
 	@Schedule(minute = "*/1", hour = "*")
 	public void updateJobsFromBjobs() {
 		try {
@@ -191,7 +209,7 @@ public class JobManagementBean {
 					String id = bjob.getJobId();
 					String status = mapStatus(bjob.getStatus());
 					
-					if( ! "Completed".equals(status) ){
+					if( ! JOBSTATUS_COMPLETED.equals(status) ){
 						uncompletedJobs++;
 					}
 					
@@ -201,10 +219,15 @@ public class JobManagementBean {
 					
 					LsfJob job = entityManager.find(LsfJob.class, id);
 					if (job != null) {/* Log updates on portal jobs */
-						if (!job.getStatus().equals(status) ) {
-							logger.debug("Updating status of job '" + id + "' from '" + job.getStatus()
+						String oldJobStatus = job.getStatus();
+						if (!oldJobStatus.equals(status) ) {
+							logger.debug("Updating status of job '" + id + "' from '" + oldJobStatus
 									+ "' to '" + status + "'");
 							job.setStatus(status);
+							if( status.equals(JOBSTATUS_COMPLETED) ){
+								// Job has 'just' become Completed, so copy job output to glassfish job area
+								moveJobOutput( job );
+							}
 						}
 					}
 				}
@@ -222,6 +245,62 @@ public class JobManagementBean {
 		}
 	}
 
+	/**
+	 * Move any job output files from the Job's batch user to our quasi-permanent holding area,
+	 * where job outputs will be stored in a job.id subfolder.
+	 * 
+	 * This should only be called for Jobs that have status Completed (though it may also be called
+	 * for jobs that "disappear" from the LSF bjobs output, on the assumption that they have finished
+	 * without us noticing).
+	 * 
+	 * It should only be called once per Job.
+	 * 
+	 * @param job
+	 * @throws InternalException
+	 */
+	private void moveJobOutput(LsfJob job) throws InternalException {
+		
+		logger.debug("Moving job output for job: " + job.getId() + " for lsf user: " + job.getBatchUsername());
+		
+		Path path = jobOutputDir.resolve(job.getId());
+		
+		// Expect to have to create this folder now.
+		if( ! Files.exists(path) ){
+			try {
+				Files.createDirectory(path);
+			} catch (IOException e) {
+				throw new InternalException("Could not create output folder for " + path.toString() );
+			}
+		}
+		
+		String batchUser = job.getBatchUsername();
+		Path batchPath = getUserJobsOutputPath( batchUser ).resolve(job.getDirectory());
+		
+		// Copy files from batchPath to path
+
+		File[] files = batchPath.toFile().listFiles();
+		if( files != null ){
+			for( File file : files ){
+				try {
+					Files.copy(file.toPath(), path.resolve(file.getName()));
+				} catch (IOException e) {
+					throw new InternalException("Could not copy output file " + file.getName() + ": " + e.getMessage() );
+				}
+			}
+		}
+		
+		// Use the batchfile owner to remove the output files.
+		
+		ShellCommand sc = new ShellCommand( "ssh", "-i", getSshIdFileNameFor( batchUser ), batchUser + "@localhost", "rm", "-rf", batchPath.toString() );
+		if( sc.isError() ){
+			throw new InternalException( "Error when trying to remove batch user output files: " + sc.getMessage() );
+		}
+		
+		// It might make sense to delete the batchfile now as well;
+		// at present, it is retained until the user explicitly deletes the job.
+		
+	}
+
 	private List<String> getActivePoolUsers() {
 		List<String> poolUsers = new ArrayList<String>();
 		for( List<String> members : families.values() ){
@@ -230,28 +309,65 @@ public class JobManagementBean {
 		return poolUsers;
 	}
 	
-	private void cleanUpJobs( String poolUserId ){
+	/**
+	 * cleanUpJobs() is called for a poolUserId when bjobs lists no jobs for that user.
+	 * It checks the set of LsfJobs for that user: if any are not known to have status Completed,
+	 * we assume that they have completed without updateJobsFromBjobs() noticing, and move any output
+	 * for them from the batch user to the glassfish output area.
+	 * Once this has been done, the batch user can be released back to the user pool.
+	 * 
+	 * @param poolUserId
+	 * @throws InternalException
+	 */
+	private void cleanUpJobs( String poolUserId ) throws InternalException{
 		for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 				.setParameter("batchusername", poolUserId).getResultList()) {
-			if( ! "Completed".equals(job.getStatus()) ){
+			if( ! JOBSTATUS_COMPLETED.equals(job.getStatus()) ){
 				logger.warn("Updating status of job '" + job.getId() + "' from '"
 						+ job.getStatus() + "' to 'Completed' as not known to bjobs");
-				job.setStatus("Completed");
+				job.setStatus(JOBSTATUS_COMPLETED);
+				moveJobOutput(job);
 			}
 		}
 		
 		// And free up this userid back to the pool
-	    // TODO What about any output from old jobs? Should it be (a) deleted or (b) moved to a safe place away from the poolUser?
 		
 		logger.debug("Userid " + poolUserId + " has no uncompleted jobs, so releasing it back to the pool (in cleanUpJobs)");
 		lsfUserPool.freeUser(poolUserId);
 	}
 
+	/**
+	 * getJoboutput() implements the RESTful method output/{jobId}. It returns an InputStream on the file (if any) that
+	 * contains the specified outputType (standard or error).
+	 * 
+	 * The source file depends on the status of the job: if we know that the job has completed, any file is assumed to be in
+	 * the glassfish holding area. If the job has completed, but we don't know that yet, the file may still be in the LSF pool
+	 * user's job-specific directory. If the job has not completed, the file may be in the pool user's .lsfbatch/ folder.
+	 * 
+	 * @param sessionId ICAT sessionId
+	 * @param jobId requested Job ID
+	 * @param outputType requested output type (standard or error)
+	 * @return InputStream on the requested output type
+	 * @throws SessionException if the sessionId is invalid (e.g. session timed out)
+	 * @throws ForbiddenException if the jobId is not associated with the session user
+	 * @throws InternalException if the file exists but access fails
+	 * @throws ParameterException if no file of the chosen output type can be found
+	 */
 	public InputStream getJobOutput(String sessionId, String jobId, OutputType outputType)
 			throws SessionException, ForbiddenException, InternalException, ParameterException {
 		
-		// In submitBatch, we specify the output files as %J.log and %J.err; %J will be replaced by the jobId.
-		// So here we look for those files.  They may not exist until the job has completed.
+		/* 
+		 * The location of the output files depends on the (real) status of the job (which we might not know).
+		 * It's possible that other threads may change the job status (and spot the change)
+		 * between testing and attempting to read.  To play safe, it is better just to look for the
+		 * files in each location in turn: 
+		 *
+		 *   1. in <poolUser>/.lsbatch/*.<jobid>.{err|out} (used during job execution, removed by LSF on completion)
+		 *   2. in <poolUser>/<jobOutputDir>/<jobid>.{log|err} (created by LSF on completion)
+		 *   3. in <glassfishArea>/<jobid>/<jobid>.{log|err} (moved by updateJobs here when it spots the job has completed)
+		 *   
+		 * TODO At present, the code still tests job status first; also glassfish can't read <poolUser>/.lsbatch
+		 */
 		
 		logger.info("getJobOutput called with sessionId:" + sessionId + " jobId:" + jobId
 				+ " outputType:" + outputType);
@@ -261,51 +377,83 @@ public class JobManagementBean {
 		String jobFilename = job.getId() + "." + (outputType == OutputType.STANDARD_OUTPUT ? "log" : "err");
 		
 		// Path path = jobOutputDir.resolve(job.getDirectory()).resolve(jobFilename);
+		
+		Path path;
+		
+		if( JOBSTATUS_COMPLETED.equals(job.getStatus())){
+			
+			// Output files should have been moved to the Glassfish output area
+			
+			logger.debug("Job has completed, so expect output files to be in glassfish area");
+			
+			Path glassfishAreaPath = getGlassfishOutputAreaFor( job );
+			path = glassfishAreaPath.resolve(jobFilename);
+			
+		} else {
+			
+			// It's possible that the job has Completed but we don't know it yet,
+			// so look in the batchUsername's output area first.
 
-		Path outputParentPath = getUserJobsOutputPath( job.getBatchUsername() );
-		Path path = outputParentPath.resolve(job.getDirectory()).resolve(jobFilename);
-
-		if (!Files.exists(path)) {
-			logger.debug("No " + outputType + " output (yet?) for job" + jobId);
+			logger.debug("Job has not (knowingly) completed, but look for pool user output files anyway");
 			
-			// In theory, we could use bpeek to get output of running job
-			// However, bpeek output is not that useful (it concatenates stdout and stderr, albeit with markers).
-			// Alternatively, bsub *appears* to use ~/.lsbatch/[0-9]*.<jobId>.{err,out,hostfile} to hold stdout/stderr during execution, and
-			// these may be more useful to us.
-			// But these files are removed when the job completes, so returning an InputStream on them may not be wise
-			
-			String userBase = Constants.SCARF_POOL_BASE;
-			Path batchFolder = Paths.get(userBase).resolve(job.getBatchUsername()) .resolve(".lsbatch");
-			final String outputFileEnding = jobId + "." + (outputType == OutputType.STANDARD_OUTPUT ? "out" : "err");
-			File [] files = batchFolder.toFile().listFiles(new FilenameFilter() {
-			    @Override
-			    public boolean accept(File dir, String name) {
-			        return name.endsWith(outputFileEnding);
-			    }
-			});
-			
-			if( files.length > 0 ){
+			Path outputParentPath = getUserJobsOutputPath( job.getBatchUsername() );
+			path = outputParentPath.resolve(job.getDirectory()).resolve(jobFilename);
+	
+			if (!Files.exists(path)) {
+				logger.debug("No " + outputType + " output (yet?) for job" + jobId + "; try looking for bsub's temp files");
 				
-				path = (files[0]).toPath();
+				// In theory, we could use bpeek to get output of running job
+				// However, bpeek output is not that useful (it concatenates stdout and stderr, albeit with markers).
+				// Alternatively, bsub *appears* to use ~/.lsbatch/[0-9]*.<jobId>.{err,out,hostfile} to hold stdout/stderr during execution, and
+				// these may be more useful to us.
+				// These files are removed when the job completes; but in that case, the pool user output files (above) *should* exist.
 				
-			} else {
+				String userBase = Constants.SCARF_POOL_BASE;
+				Path batchFolder = Paths.get(userBase).resolve(job.getBatchUsername()).resolve(".lsbatch");
 				
-				throw new ParameterException("No output file of type " + outputType
-						+ " available at the moment");
+				logger.debug("Batch folder to look in: " + batchFolder.toString());
+				
+				final String outputFileEnding = jobId + "." + (outputType == OutputType.STANDARD_OUTPUT ? "out" : "err");
+				File [] files = batchFolder.toFile().listFiles(new FilenameFilter() {
+				    @Override
+				    public boolean accept(File dir, String name) {
+				        return name.endsWith(outputFileEnding);
+				    }
+				});
+				
+				if( files != null && files.length > 0 ){
+					
+					path = (files[0]).toPath();
+					
+				} else {
+					
+					logger.debug("No bsub temp files found");
+					
+					throw new ParameterException("No output file of type " + outputType
+							+ " available at the moment");
+				}
 			}
 		}
 		if (Files.exists(path)) {
-			logger.debug("Returning output for " + jobId);
+			logger.debug("Try to create stream for " + path.toString() );
 			try {
 				is = Files.newInputStream(path);
 			} catch (IOException e) {
 				throw new InternalException(e.getClass() + " reports " + e.getMessage());
 			}
+			logger.debug("Returning output for " + jobId);
 			return is;
 
 		} else {
-			throw new InternalException("No output file available at the moment");
+			throw new ParameterException("No output file of type " + outputType
+					+ " available at the moment");
 		}
+	}
+
+	private Path getGlassfishOutputAreaFor(LsfJob job) {
+		// Return the path to the output area under glassfish for the given job.
+		// Here, we can use the jobId
+		return jobOutputDir.resolve(job.getId());
 	}
 
 	private Path getUserJobsOutputPath(String batchUsername) throws InternalException {
@@ -327,6 +475,23 @@ public class JobManagementBean {
 		
 	}
 
+	/**
+	 * submitBatch implements the non-interactive case of the RESTful method submit.
+	 * If a free LSF pool user can be found, it is bound to the supplied (ICAT) userName, and is used to submit a non-interactive bsub job based on
+	 * the supplied exeutable and parameters.
+	 * For the submission, a dedicated subfolder is created under the LSF pool user to which bsub's standard and error output files will be
+	 * written once the job completes.
+	 * The job details are added to the persistent store for access in subsequent method requests (and the scheduled method updateJobsFromBjobs()).
+	 * 
+	 * @param userName ICAT username
+	 * @param executable name of the executable to run
+	 * @param parameters list of arguments (provided to the executable on the command line)
+	 * @param family Family from which pool users should be drawn for this job
+	 * @return String job ID returned by bsub
+	 * @throws ParameterException
+	 * @throws InternalException
+	 * @throws SessionException
+	 */
 	public String submitBatch(String userName, String executable, List<String> parameters,
 			String family) throws ParameterException, InternalException, SessionException {
 
@@ -363,7 +528,7 @@ public class JobManagementBean {
 				pw[i] = chars.charAt(random.nextInt(chars.length()));
 			}
 			String batchScriptName = new String(pw) + ".sh";
-			batchScriptFile = new File(batchFileDir.toString(), batchScriptName);
+			batchScriptFile = new File(jobOutputDir.toString(), batchScriptName);
 		} while (batchScriptFile.exists());
 
 		createScript(batchScriptFile, jobName, executable, parameters);
@@ -393,7 +558,15 @@ public class JobManagementBean {
 		job.setSubmitDate(new Date());
 		
 		// Get the initial status of the job from LSF
-		job.setStatus( getStatus(job) );
+		String status = getStatus(job);
+		job.setStatus( status );
+		
+		// If the job has already Completed (which would be suspiciously quick), we need to move the job output
+		// to where getJobOutput will expect to find it.
+		
+		if( JOBSTATUS_COMPLETED.equals(status) ){
+			moveJobOutput(job);
+		}
 		
 		entityManager.persist(job);
 		
@@ -480,7 +653,7 @@ public class JobManagementBean {
 			writeln(bw, "rc=$?");
 			writeln(bw, "echo $(date) - " + executable + " ending with code $rc");
 			
-			// TODO Add 'rm -rf *' to enforce cleanup?
+			// We can't just add 'rm -rf *' to enforce cleanup, it might remove legal job output too.
 			
 		} catch (IOException e) {
 			throw new InternalException("Exception creating batch script: " + e.getMessage());
@@ -552,6 +725,18 @@ public class JobManagementBean {
 		return sb.toString();
 	}
 
+	/**
+	 * submitInteractive() implements the interactive case of the RESTful method submit.
+	 * It is not supported at present.
+	 * 
+	 * @param userName
+	 * @param executable
+	 * @param parameters
+	 * @param family
+	 * @return
+	 * @throws InternalException
+	 * @throws ParameterException
+	 */
 	public String submitInteractive(String userName, String executable, List<String> parameters,
 			String family) throws InternalException, ParameterException {
 		throw new ParameterException("Interactive jobs are not currently supported by LsfBatch");
@@ -572,6 +757,16 @@ public class JobManagementBean {
 		}
 	}
 
+	/**
+	 * listStatus() implements the RESTful method status (with no jobId parameter).
+	 * It returns a Json array reporting status and other attributes for each job belonging to the session owner.
+	 * 
+	 * @param sessionId
+	 * @return
+	 * @throws SessionException
+	 * @throws ParameterException
+	 * @throws InternalException
+	 */
 	public String listStatus(String sessionId) throws SessionException, ParameterException,
 			InternalException {
 		logger.info("listStatus called with sessionId:" + sessionId);
@@ -613,19 +808,31 @@ public class JobManagementBean {
 			}
 			String status = jobsByOwner.get(jobId);
 			if (status == null) {
-				status = "Completed";
+				status = JOBSTATUS_COMPLETED;
 			}
 			gen.writeStartObject().write("Id", job.getId()).write("Status", status)
 					.write("Executable", job.getExecutable())
 					.write("Date of submission", job.getSubmitDate().toString()).writeEnd();
 			
-			// Update Job status too
-			job.setStatus(status);
+			// Update Job status too? No, leave it to the scheduled job, which also moves the job output when it detects a change to Completed.
+			// job.setStatus(status);
 		}
 		gen.writeEnd().close();
 		return baos.toString();
 	}
 
+	/**
+	 * getStatus(jobId,...) implements the RESTful method status/{jobId}.
+	 * It returns a Json string containing the status and other attributes of the supplied jobId.
+	 * 
+	 * @param jobId
+	 * @param sessionId
+	 * @return
+	 * @throws SessionException
+	 * @throws ForbiddenException
+	 * @throws ParameterException
+	 * @throws InternalException
+	 */
 	public String getStatus(String jobId, String sessionId) throws SessionException,
 			ForbiddenException, ParameterException, InternalException {
 		logger.info("getStatus called with sessionId:" + sessionId + " jobId:" + jobId);
@@ -676,19 +883,19 @@ public class JobManagementBean {
 	 */
 	private String mapStatus(String status) {
 
-		String outStatus = "Unknown";
+		String outStatus = JOBSTATUS_UNKNOWN;
 		
 		if( "PEND".equals(status) || "WAIT".equals(status) ){
-			outStatus = "Queued";
+			outStatus = JOBSTATUS_QUEUED;
 		} else if( "DONE".equals(status) || "EXIT".equals(status) ){
-			outStatus = "Completed";
+			outStatus = JOBSTATUS_COMPLETED;
 		} else if( "RUN".equals(status) ){
-			outStatus = "Executing";
+			outStatus = JOBSTATUS_EXECUTING;
 		} else if( "PSUSP".equals(status) || "USUSP".equals(status) || "SSUSP".equals(status) ){
-			outStatus = "Held";
+			outStatus = JOBSTATUS_HELD;
 		} else if( "UNKWN".equals(status) || "ZOMBI".equals(status) ){
 			// These are the "known unknowns" :-)
-			outStatus = "Unknown";
+			outStatus = JOBSTATUS_UNKNOWN;
 		}
 		return outStatus;
 	}
@@ -706,6 +913,20 @@ public class JobManagementBean {
 		return job;
 	}
 
+	/**
+	 * delete() implements the RESTful method delete/{jobId}.
+	 * The specified job must have completed (including by being cancelled).
+	 * It removes any job output and deletes the job from the persistent store.
+	 * We assume that the associated pool user can now be released back to the pool
+	 * (this assumes that each pool user only runs a single job at a time).
+	 * 
+	 * @param sessionId
+	 * @param jobId
+	 * @throws SessionException
+	 * @throws ForbiddenException
+	 * @throws InternalException
+	 * @throws ParameterException
+	 */
 	public void delete(String sessionId, String jobId) throws SessionException, ForbiddenException,
 			InternalException, ParameterException {
 		
@@ -714,27 +935,35 @@ public class JobManagementBean {
 		String owner = job.getBatchUsername();
 		logger.debug("job " + jobId + " is being run by " + owner);
 		
-		// Get the status of this job.
+		ShellCommand sc;
 		
-		String idFileName = getSshIdFileNameFor( owner );
-
-		ShellCommand sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bjobs", "-aw", jobId);
-		if (sc.isError()) {
-			throw new InternalException("Unable to query job (id " + jobId
-					+ ") via bjobs: " + sc.getStderr());
-		}
+		// If we don't know that the Job has Completed, check the current status, if we can
 		
-		Bjobs bjobs = new Bjobs( sc.getStdout() );
-		Bjobs.Job bjob = bjobs.getJob(jobId);
-		if( bjob == null ){
-			throw new InternalException("Unable to find job (id " + jobId + ") in bjobs" );
-		}
-		
-		String status = mapStatus( bjob.getStatus() );
-		logger.debug("Status is " + status);
-		if (!status.equals("Completed")) {
-			// TODO what about Unknown jobs?
-			throw new ParameterException("LsfJob " + jobId + " is " + status);
+		if( ! JOBSTATUS_COMPLETED.equals(job.getStatus())){
+			// Get the status of this job.
+			
+			String idFileName = getSshIdFileNameFor( owner );
+	
+			sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bjobs", "-aw", jobId);
+			if (sc.isError()) {
+				throw new InternalException("Unable to query job (id " + jobId
+						+ ") via bjobs: " + sc.getStderr());
+			}
+			
+			Bjobs bjobs = new Bjobs( sc.getStdout() );
+			Bjobs.Job bjob = bjobs.getJob(jobId);
+			if( bjob != null ){
+				
+				// Check whether the job has actually finished
+			
+				String status = mapStatus( bjob.getStatus() );
+				logger.debug("Status is " + status);
+				if (! JOBSTATUS_COMPLETED.equals(status)) {
+					throw new ParameterException("LsfJob " + jobId + " is " + status);
+				}
+			} else {
+				logger.debug("Delete called for job with supposed status " + job.getStatus() + ", but not found in bjobs, so assume it has Completed.");
+			}
 		}
 
 		entityManager.remove(job);
@@ -747,13 +976,18 @@ public class JobManagementBean {
 		try {
 			Path dir = getUserJobsOutputPath(owner).resolve(job.getDirectory());
 			
-			// And get the owner to remove everything under there.
+			// And get the owner to remove everything under there - if it hasn't been removed already
 			
-			sc = new ShellCommand("ssh", "-i", getSshIdFileNameFor(owner), owner + "@localhost", "rm", "-rf", dir.toString());
-			if (sc.isError()) {
-				throw new InternalException("Unable to delete job output folder for user " + owner + ": " + sc.getStderr());
+			if( Files.exists(dir)) {
+				sc = new ShellCommand("ssh", "-i", getSshIdFileNameFor(owner), owner + "@localhost", "rm", "-rf", dir.toString());
+				if (sc.isError()) {
+					throw new InternalException("Unable to delete job output folder for user " + owner + ": " + sc.getStderr());
+				}
 			}
-						
+			
+			// Remove the job output dir in glassfish
+			
+			dir = getGlassfishOutputAreaFor( job );
 			File[] files = dir.toFile().listFiles();
 			if (files != null) {
 				for (File f : dir.toFile().listFiles()) {
@@ -762,6 +996,12 @@ public class JobManagementBean {
 				Files.delete(dir);
 				logger.debug("Directory " + dir + " has been deleted");
 			}
+			
+			// And remove the batchfile
+			// (Alternative: remove it once the job has Completed?)
+			
+			Files.deleteIfExists(Paths.get(job.getBatchfileName()));
+			
 		} catch (IOException e) {
 			throw new InternalException("Unable to delete jobOutputDirectory "
 					+ job.getDirectory());
@@ -769,6 +1009,20 @@ public class JobManagementBean {
 
 	}
 
+	/**
+	 * cancel() implements the RESTful method cancel/{jobId}.
+	 * It uses the Platform LSF bkill command to kill the specified job.
+	 * It does not remove any existing job output, nor does it clean up or release the pool user;
+	 * we rely on a subsequent delete request or some future scheduled run of updateJobsFromBjobs
+	 * to do that.
+	 * 
+	 * @param sessionId
+	 * @param jobId
+	 * @throws SessionException
+	 * @throws ForbiddenException
+	 * @throws InternalException
+	 * @throws ParameterException
+	 */
 	public void cancel(String sessionId, String jobId) throws SessionException, ForbiddenException,
 			InternalException, ParameterException {
 		
@@ -789,6 +1043,20 @@ public class JobManagementBean {
 		}
 	}
 
+	/**
+	 * submit() implements the RESTful method submit.
+	 * Note that only batch submission is available at present.
+	 * 
+	 * @param sessionId
+	 * @param executable
+	 * @param parameters
+	 * @param family
+	 * @param interactive
+	 * @return
+	 * @throws InternalException
+	 * @throws SessionException
+	 * @throws ParameterException
+	 */
 	public String submit(String sessionId, String executable, List<String> parameters,
 			String family, boolean interactive) throws InternalException, SessionException,
 			ParameterException {
@@ -808,6 +1076,21 @@ public class JobManagementBean {
 		return baos.toString();
 	}
 
+	/**
+	 * estimate() implements the RESTful method estimate.
+	 * It takes the same parameters as the submit method, and returns a Json string
+	 * containing a "time" field.
+	 * At present, only batch jobs are supported; further, the estimate is wildly optimistic!
+	 * 
+	 * @param sessionId
+	 * @param executable
+	 * @param parameters
+	 * @param family
+	 * @param interactive
+	 * @return
+	 * @throws SessionException
+	 * @throws ParameterException
+	 */
 	public String estimate(String sessionId, String executable, List<String> parameters,
 			String family, boolean interactive) throws SessionException, ParameterException {
 		String userName = getUserName(sessionId);

@@ -15,14 +15,14 @@ actions, options, arg = getActions()
 props = actions.getGlassfish("lsfbatch-setup.properties", ["dbProperties", "glassfish", "driver", "port"])
 
 prop_name = "lsfbatch.properties"
-prop_list = ["icat.url", "families.list", "batchFileDir"]
+prop_list = ["icat.url", "families.list", "jobOutputDir"]
 
 if arg in ["CONFIGURE", "INSTALL"]:
     actions.configure(prop_name, prop_list) 
     lsfbatchProperties = actions.getProperties(prop_name, prop_list)
     actions.checkNoErrors()
-    if not actions.configFileExists(lsfbatchProperties.get("batchFileDir")):
-        abort("Please create directory " + lsfbatchProperties.get("batchFileDir") + 
+    if not actions.configFileExists(lsfbatchProperties.get("jobOutputDir")):
+        abort("Please create directory " + lsfbatchProperties.get("jobOutputDir") + 
                " relative to the config directory as specified in lsfbatch.properties")
 
 

@@ -4,4 +4,4 @@ families.list = batch ingest
 families.batch = ijp01 ijp02
 families.ingest = ingest01 ingest02
 
-batchFileDir = /home/escg/glassfish/ijp_batchfiles
+jobOutputDir = /home/escg/glassfish/jobOutputDir

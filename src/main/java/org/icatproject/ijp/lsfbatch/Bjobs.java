@@ -112,6 +112,10 @@ public class Bjobs {
 		Scanner scanner = new Scanner(bJobsOutput);
 		while( scanner.hasNextLine()){
 			String line = scanner.nextLine();
+			if( line.trim().length() == 0 ){
+				// Skip blank lines
+				continue;
+			}
 			Matcher m = outputRowPattern.matcher(line);
 			if( ! m.matches() ){
 				
