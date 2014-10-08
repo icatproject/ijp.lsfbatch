@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.icatproject.ijp.lsfbatch.exceptions.InternalException;
+import org.icatproject.ijp.batch.exceptions.InternalException;
 
 /**
  * Singleton class to manage sets of free/assigned Lsf user IDs

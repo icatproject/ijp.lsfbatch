@@ -11,7 +11,7 @@ import java.util.Calendar;
 import java.util.Set;
 
 import org.icatproject.ijp.lsfbatch.Bjobs;
-import org.icatproject.ijp.lsfbatch.exceptions.InternalException;
+import org.icatproject.ijp.batch.exceptions.InternalException;
 
 public class BjobsTest {
 

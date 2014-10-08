@@ -13,7 +13,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.icatproject.ijp.lsfbatch.exceptions.InternalException;
+import org.icatproject.ijp.batch.exceptions.InternalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

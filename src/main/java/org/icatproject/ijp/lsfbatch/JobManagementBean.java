@@ -38,10 +38,13 @@ import javax.xml.namespace.QName;
 import org.icatproject.ICAT;
 import org.icatproject.ICATService;
 import org.icatproject.IcatException_Exception;
-import org.icatproject.ijp.lsfbatch.exceptions.ForbiddenException;
-import org.icatproject.ijp.lsfbatch.exceptions.InternalException;
-import org.icatproject.ijp.lsfbatch.exceptions.ParameterException;
-import org.icatproject.ijp.lsfbatch.exceptions.SessionException;
+import org.icatproject.ijp.batch.BatchJson;
+import org.icatproject.ijp.batch.JobStatus;
+import org.icatproject.ijp.batch.OutputType;
+import org.icatproject.ijp.batch.exceptions.ForbiddenException;
+import org.icatproject.ijp.batch.exceptions.InternalException;
+import org.icatproject.ijp.batch.exceptions.ParameterException;
+import org.icatproject.ijp.batch.exceptions.SessionException;
 import org.icatproject.utils.CheckedProperties;
 import org.icatproject.utils.ShellCommand;
 import org.slf4j.Logger;
@@ -52,18 +55,6 @@ import org.slf4j.LoggerFactory;
  */
 @Stateless
 public class JobManagementBean {
-
-	public enum OutputType {
-		STANDARD_OUTPUT, ERROR_OUTPUT;
-	}
-	
-	// TODO Replace static strings with ijp.batch.JobStatus values
-	
-	private static String JOBSTATUS_QUEUED = "Queued";
-	private static String JOBSTATUS_COMPLETED = "Completed";
-	private static String JOBSTATUS_EXECUTING = "Executing";
-	private static String JOBSTATUS_HELD = "Held";
-	private static String JOBSTATUS_UNKNOWN = "Unknown";
 
 	private ICAT icat;
 
@@ -108,8 +99,8 @@ public class JobManagementBean {
 					boolean isAssigned = false;
 					for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 							.setParameter("batchusername", lsfUserId).getResultList()) {
-						String status = job.getStatus();
-						if( status != null && ! status.equals(JOBSTATUS_COMPLETED) ){
+						JobStatus status = job.getStatus();
+						if( status != null && ! status.equals(JobStatus.Completed) ){
 							isAssigned = true;
 						}
 					}
@@ -207,9 +198,9 @@ public class JobManagementBean {
 				
 				for (Bjobs.Job bjob : bJobs.getJobs()) {
 					String id = bjob.getJobId();
-					String status = mapStatus(bjob.getStatus());
+					JobStatus status = mapStatus(bjob.getStatus());
 					
-					if( ! JOBSTATUS_COMPLETED.equals(status) ){
+					if( ! JobStatus.Completed.equals(status) ){
 						uncompletedJobs++;
 					}
 					
@@ -219,12 +210,12 @@ public class JobManagementBean {
 					
 					LsfJob job = entityManager.find(LsfJob.class, id);
 					if (job != null) {/* Log updates on portal jobs */
-						String oldJobStatus = job.getStatus();
+						JobStatus oldJobStatus = job.getStatus();
 						if (!oldJobStatus.equals(status) ) {
 							logger.debug("Updating status of job '" + id + "' from '" + oldJobStatus
 									+ "' to '" + status + "'");
 							job.setStatus(status);
-							if( status.equals(JOBSTATUS_COMPLETED) ){
+							if( status.equals(JobStatus.Completed) ){
 								// Job has 'just' become Completed, so copy job output to glassfish job area
 								moveJobOutput( job );
 							}
@@ -322,10 +313,10 @@ public class JobManagementBean {
 	private void cleanUpJobs( String poolUserId ) throws InternalException{
 		for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 				.setParameter("batchusername", poolUserId).getResultList()) {
-			if( ! JOBSTATUS_COMPLETED.equals(job.getStatus()) ){
+			if( ! JobStatus.Completed.equals(job.getStatus()) ){
 				logger.warn("Updating status of job '" + job.getId() + "' from '"
 						+ job.getStatus() + "' to 'Completed' as not known to bjobs");
-				job.setStatus(JOBSTATUS_COMPLETED);
+				job.setStatus(JobStatus.Completed);
 				moveJobOutput(job);
 			}
 		}
@@ -532,13 +523,13 @@ public class JobManagementBean {
 		job.setSubmitDate(new Date());
 		
 		// Get the initial status of the job from LSF
-		String status = getStatus(job);
+		JobStatus status = getStatus(job);
 		job.setStatus( status );
 		
 		// If the job has already Completed (which would be suspiciously quick), we need to move the job output
 		// to where getJobOutput will expect to find it.
 		
-		if( JOBSTATUS_COMPLETED.equals(status) ){
+		if( JobStatus.Completed.equals(status) ){
 			moveJobOutput(job);
 		}
 		
@@ -732,67 +723,23 @@ public class JobManagementBean {
 	}
 
 	/**
-	 * listStatus() implements the RESTful method status (with no jobId parameter).
-	 * It returns a Json array reporting status and other attributes for each job belonging to the session owner.
+	 * List the ids of those jobs owned by the session user.
 	 * 
 	 * @param sessionId
-	 * @return
+	 * @return Json array of job-ids
 	 * @throws SessionException
 	 * @throws ParameterException
 	 * @throws InternalException
 	 */
-	public String listStatus(String sessionId) throws SessionException, ParameterException,
-			InternalException {
+	public String list(String sessionId) throws SessionException,
+			ParameterException, InternalException {
 		logger.info("listStatus called with sessionId:" + sessionId);
 
 		String username = getUserName(sessionId);
-		ByteArrayOutputStream baos = new ByteArrayOutputStream();
-		JsonGenerator gen = Json.createGenerator(baos).writeStartArray();
-		Map<String, Map<String, String>> jobs = new HashMap<>();
-		for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_USERNAME, LsfJob.class)
-				.setParameter("username", username).getResultList()) {
-
-			String jobId = job.getId();
-			String owner = job.getBatchUsername();
-			Map<String, String> jobsByOwner = jobs.get(owner);
-			if (jobsByOwner == null) {
-				
-				// First time we've needed jobs for this owner, so get them all and cache for future reference
-				// So we only run bjobs for each LSF user once
-				
-				jobsByOwner = new HashMap<>();
-				jobs.put(owner, jobsByOwner);
-				String idFileName = getSshIdFileNameFor( owner );
-
-				ShellCommand sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bjobs", "-aw");
-				if (sc.isError()) {
-					throw new InternalException("Unable to query jobs for userid " + owner
-							+ ") via bjobs: " + sc.getStderr());
-				}
-				
-				Bjobs bjobs = new Bjobs( sc.getStdout() );
-				
-				for( Bjobs.Job bjob : bjobs.getJobs() ){
-					
-					// Some of these jobs may not belong to username, but we only retrieve by username's jobs below
-					jobsByOwner.put( bjob.getJobId(), mapStatus(bjob.getStatus() ));
-				}
-				
-				logger.debug("Built list of jobs for " + owner + ": " + jobsByOwner);
-			}
-			String status = jobsByOwner.get(jobId);
-			if (status == null) {
-				status = JOBSTATUS_COMPLETED;
-			}
-			gen.writeStartObject().write("Id", job.getId()).write("Status", status)
-					.write("Executable", job.getExecutable())
-					.write("Date of submission", job.getSubmitDate().toString()).writeEnd();
-			
-			// Update Job status too? No, leave it to the scheduled job, which also moves the job output when it detects a change to Completed.
-			// job.setStatus(status);
-		}
-		gen.writeEnd().close();
-		return baos.toString();
+		List<String> jobs = entityManager
+				.createNamedQuery(LsfJob.ID_BY_USERNAME, String.class)
+				.setParameter("username", username).getResultList();
+		return BatchJson.list(jobs);
 	}
 
 	/**
@@ -812,18 +759,12 @@ public class JobManagementBean {
 		logger.info("getStatus called with sessionId:" + sessionId + " jobId:" + jobId);
 		LsfJob job = getJob(sessionId, jobId);
 		
-		String status = getStatus( job );
+		JobStatus status = getStatus( job );
 		
-		ByteArrayOutputStream baos = new ByteArrayOutputStream();
-		JsonGenerator gen = Json.createGenerator(baos);
-		gen.writeStartObject().write("Id", jobId).write("Status", status)
-				.write("Executable", job.getExecutable())
-				.write("Date of submission", job.getSubmitDate().toString());
-		gen.writeEnd().close();
-		return baos.toString();
+		return BatchJson.getStatus(status);
 	}
 	
-	private String getStatus( LsfJob job ) throws InternalException{
+	private JobStatus getStatus( LsfJob job ) throws InternalException{
 		
 		String jobId = job.getId();
 		String owner = job.getBatchUsername();
@@ -853,23 +794,23 @@ public class JobManagementBean {
 	 * Convert the "low-level" status values returned by bjobs into broad status values that we report back
 	 * 
 	 * @param status the bjobs status value
-	 * @return mapped status value - one of Completed, Executing, Queued, Held, Unknown
+	 * @return mapped JobStatus value - one of Completed, Executing, Queued, Held, Unknown
 	 */
-	private String mapStatus(String status) {
+	private JobStatus mapStatus(String status) {
 
-		String outStatus = JOBSTATUS_UNKNOWN;
+		JobStatus outStatus = JobStatus.Unknown;
 		
 		if( "PEND".equals(status) || "WAIT".equals(status) ){
-			outStatus = JOBSTATUS_QUEUED;
+			outStatus = JobStatus.Queued;
 		} else if( "DONE".equals(status) || "EXIT".equals(status) ){
-			outStatus = JOBSTATUS_COMPLETED;
+			outStatus = JobStatus.Completed;
 		} else if( "RUN".equals(status) ){
-			outStatus = JOBSTATUS_EXECUTING;
+			outStatus = JobStatus.Executing;
 		} else if( "PSUSP".equals(status) || "USUSP".equals(status) || "SSUSP".equals(status) ){
-			outStatus = JOBSTATUS_HELD;
+			outStatus = JobStatus.Held;
 		} else if( "UNKWN".equals(status) || "ZOMBI".equals(status) ){
 			// These are the "known unknowns" :-)
-			outStatus = JOBSTATUS_UNKNOWN;
+			outStatus = JobStatus.Unknown;
 		}
 		return outStatus;
 	}
@@ -913,7 +854,7 @@ public class JobManagementBean {
 		
 		// If we don't know that the Job has Completed, check the current status, if we can
 		
-		if( ! JOBSTATUS_COMPLETED.equals(job.getStatus())){
+		if( ! JobStatus.Completed.equals(job.getStatus())){
 			// Get the status of this job.
 			
 			String idFileName = getSshIdFileNameFor( owner );
@@ -930,9 +871,9 @@ public class JobManagementBean {
 				
 				// Check whether the job has actually finished
 			
-				String status = mapStatus( bjob.getStatus() );
+				JobStatus status = mapStatus( bjob.getStatus() );
 				logger.debug("Status is " + status);
-				if (! JOBSTATUS_COMPLETED.equals(status)) {
+				if (! JobStatus.Completed.equals(status)) {
 					throw new ParameterException("LsfJob " + jobId + " is " + status);
 				}
 			} else {

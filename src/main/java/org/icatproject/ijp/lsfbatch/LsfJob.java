@@ -4,20 +4,26 @@ import java.io.Serializable;
 import java.util.Date;
 
 import javax.persistence.Entity;
+import javax.persistence.EnumType;
+import javax.persistence.Enumerated;
 import javax.persistence.Id;
 import javax.persistence.NamedQueries;
 import javax.persistence.NamedQuery;
 import javax.persistence.Temporal;
 import javax.persistence.TemporalType;
 
+import org.icatproject.ijp.batch.JobStatus;
+
 @SuppressWarnings("serial")
 @Entity
 @NamedQueries({
 	@NamedQuery(name = "LsfJob.FIND_BY_USERNAME", query = "SELECT j FROM LsfJob j WHERE j.username = :username ORDER BY j.submitDate DESC"),
+	@NamedQuery(name = "LsfJob.ID_BY_USERNAME", query = "SELECT j.id FROM LsfJob j WHERE j.username = :username ORDER BY j.submitDate DESC"),
 	@NamedQuery(name = "LsfJob.FIND_BY_BATCHUSERNAME", query = "SELECT j FROM LsfJob j WHERE j.batchUsername = :batchusername ORDER BY j.submitDate DESC") })
 public class LsfJob implements Serializable {
 
 	public final static String FIND_BY_USERNAME = "LsfJob.FIND_BY_USERNAME";
+	public final static String ID_BY_USERNAME = "LsfJob.ID_BY_USERNAME";
 	public final static String FIND_BY_BATCHUSERNAME = "LsfJob.FIND_BY_BATCHUSERNAME";
 
 	private String batchUsername;
@@ -34,7 +40,8 @@ public class LsfJob implements Serializable {
 
 	private String username;
 	
-	private String status;
+	@Enumerated(EnumType.STRING)
+	private JobStatus status;
 
 	public LsfJob() {
 	}
@@ -67,7 +74,7 @@ public class LsfJob implements Serializable {
 		return username;
 	}
 	
-	public String getStatus(){
+	public JobStatus getStatus(){
 		return status;
 	}
 
@@ -99,7 +106,7 @@ public class LsfJob implements Serializable {
 		this.username = username;
 	}
 	
-	public void setStatus(String status){
+	public void setStatus(JobStatus status){
 		this.status = status;
 	}
 }
