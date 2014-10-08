@@ -5,3 +5,6 @@ families.batch = ijp01 ijp02
 families.ingest = ingest01 ingest02
 
 jobOutputDir = /home/escg/glassfish/jobOutputDir
+lsf.defaultQueue = scarf-rhel6
+lsf.userPoolBaseDir = /home/escg
+lsf.userOutputDir = jobsOutput

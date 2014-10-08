@@ -64,9 +64,10 @@ public class JobManagementBean {
 
 	private Path jobOutputDir;
 
-	// per-LSF user subdirectory used to hold job-specific directories
+	private String lsfDefaultQueue;
+	private String lsfUserPoolBaseDir;
+	private String lsfUserOutputDir;
 	
-	private final static String lsfUserOutputDir = "jobsOutput";
 	private final static String chars = "abcdefghijklmnpqrstuvwxyz";
 
 	@PostConstruct
@@ -117,6 +118,13 @@ public class JobManagementBean {
 			}
 			jobOutputDir = jobOutputDir.toAbsolutePath();
 
+			lsfDefaultQueue = props.getString("lsf.defaultQueue");
+			
+			// TODO lsfUserPoolBaseDir could be checked as a Path, but was refactored from a String constant and left as a String for now
+			
+			lsfUserPoolBaseDir = props.getString("lsf.userPoolBaseDir");
+			lsfUserOutputDir = props.getString("lsf.userOutputDir");
+			
 			if (props.has("javax.net.ssl.trustStore")) {
 				System.setProperty("javax.net.ssl.trustStore",
 						props.getProperty("javax.net.ssl.trustStore"));
@@ -368,7 +376,7 @@ public class JobManagementBean {
 		
 		logger.debug("Looking for mid-execution temporary output files first...");
 		
-		String userBase = Constants.SCARF_POOL_BASE;
+		String userBase = lsfUserPoolBaseDir;
 		Path batchFolder = Paths.get(userBase).resolve(batchUser)
 				.resolve(".lsbatch");
 
@@ -422,7 +430,7 @@ public class JobManagementBean {
 	}
 
 	private Path getUserJobsOutputPath(String batchUsername) throws InternalException {
-		String userBase = Constants.SCARF_POOL_BASE;
+		String userBase = lsfUserPoolBaseDir;
 		
 		Path outputParentPath = Paths.get(userBase).resolve(batchUsername).resolve(lsfUserOutputDir);
 		if( !Files.exists(outputParentPath)){
@@ -471,7 +479,7 @@ public class JobManagementBean {
 		String owner = assignLsfIdFrom( family );
 		String idFileName = getSshIdFileNameFor( owner );
 		
-		String queueName = Constants.IJP_DEFAULT_QUEUE;
+		String queueName = lsfDefaultQueue;
 		
 		// For now, use the executable as the job name.  May want to improve on this later.
 		
@@ -568,7 +576,7 @@ public class JobManagementBean {
 		
 		// Looks like this has to be an absolute path
 		
-		String userBase = Constants.SCARF_POOL_BASE;
+		String userBase = lsfUserPoolBaseDir;
 		
 		Path sshIdPath = Paths.get(userBase).resolve("glassfish").resolve(".ssh").resolve("id_rsa_"+owner);
 		return sshIdPath.toString();
