@@ -101,7 +101,7 @@ public class JobManagementBean {
 					for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 							.setParameter("batchusername", lsfUserId).getResultList()) {
 						JobStatus status = job.getStatus();
-						if( status != null && ! status.equals(JobStatus.Completed) ){
+						if( status != null && ! isFinished(status) ){
 							isAssigned = true;
 						}
 					}
@@ -152,11 +152,12 @@ public class JobManagementBean {
 
 	/**
 	 * updateJobsFromBjobs() is a scheduled method (every minute) to update the status of all known jobs for each LSF pool user.
-	 * For a particular pool user, if bjobs returns no jobs, or if all jobs now have status Completed, the pool user is
+	 * For a particular pool user, if bjobs returns no jobs, or if all jobs are finished, the pool user is
 	 * released back to the pool (this may be a no-op as they may already be released).  At this point, any jobs with
-	 * status other than Completed will be assumed Completed (as they are no longer appearing in the bjobs output).
+	 * an unfinished status will be assumed Completed (as they are no longer appearing in the bjobs output).
 	 * Additionally, if any job's status changes to Completed, the job's output is moved from the pool user account to the
-	 * glassfish holding area.
+	 * glassfish holding area.  Jobs with status Cancelled require special care: bjobs will return a status of Completed
+	 * (mapped from EXIT), so we need to move their output if it hasn't been moved already.
 	 * As this is a scheduled method, any exceptions that may be raised from execution of bjobs, file moves or cleanups
 	 * will be caught and (merely) logged.
 	 */
@@ -208,7 +209,7 @@ public class JobManagementBean {
 					String id = bjob.getJobId();
 					JobStatus status = mapStatus(bjob.getStatus());
 					
-					if( ! JobStatus.Completed.equals(status) ){
+					if( ! isFinished(status) ){
 						uncompletedJobs++;
 					}
 					
@@ -218,14 +219,31 @@ public class JobManagementBean {
 					
 					LsfJob job = entityManager.find(LsfJob.class, id);
 					if (job != null) {/* Log updates on portal jobs */
+						
 						JobStatus oldJobStatus = job.getStatus();
 						if (!oldJobStatus.equals(status) ) {
-							logger.debug("Updating status of job '" + id + "' from '" + oldJobStatus
-									+ "' to '" + status + "'");
-							job.setStatus(status);
+							
+							if( ! JobStatus.Cancelled.equals(oldJobStatus) ){
+								logger.debug("Updating status of job '" + id + "' from '" + oldJobStatus
+										+ "' to '" + status + "'");
+								job.setStatus(status);
+							} else {
+								logger.debug("Job '" + id + "' is Cancelled, ignoring bjobs status (" + status + ")");
+							}
 							if( status.equals(JobStatus.Completed) ){
-								// Job has 'just' become Completed, so copy job output to glassfish job area
-								moveJobOutput( job );
+								
+								// If the oldJobStatus is anything other than Cancelled (it can't be Completed here),
+								// we have probably spotted the job's completion for the first time, and should move
+								// the output to the glassfish job area.
+								// If the job has been Cancelled, we only want to move the output the first time
+								// that bjobs returns a status of Completed (mapped from EXIT).
+								// If the final output folder exists, assume we've already moved the output
+								
+								if( (! JobStatus.Cancelled.equals(oldJobStatus)) || (! finalOutputDirExists(job)) ){
+									// Job has 'just' finished, so copy job output to glassfish job area
+									logger.debug("Job '" + id + "' has (just) finished.");
+									moveJobOutput( job );
+								}
 							}
 						}
 					}
@@ -242,6 +260,14 @@ public class JobManagementBean {
 			logger.error("Update of db jobs from bjobs failed (exception caught here). Class " + e.getClass() + " reports "
 					+ e.getMessage() + baos.toString());
 		}
+	}
+	
+	private boolean isFinished( JobStatus status ){
+		return JobStatus.Completed.equals(status) || JobStatus.Cancelled.equals(status);
+	}
+	
+	private boolean finalOutputDirExists( LsfJob job ){
+		return Files.exists(jobOutputDir.resolve(job.getId()));
 	}
 
 	/**
@@ -321,7 +347,7 @@ public class JobManagementBean {
 	private void cleanUpJobs( String poolUserId ) throws InternalException{
 		for (LsfJob job : entityManager.createNamedQuery(LsfJob.FIND_BY_BATCHUSERNAME, LsfJob.class)
 				.setParameter("batchusername", poolUserId).getResultList()) {
-			if( ! JobStatus.Completed.equals(job.getStatus()) ){
+			if( ! isFinished(job.getStatus()) ){
 				logger.warn("Updating status of job '" + job.getId() + "' from '"
 						+ job.getStatus() + "' to 'Completed' as not known to bjobs");
 				job.setStatus(JobStatus.Completed);
@@ -772,10 +798,24 @@ public class JobManagementBean {
 		return BatchJson.getStatus(status);
 	}
 	
+	/**
+	 * Returns the "best/last" known status of the given job. 
+	 * If bjobs has an entry for the job, it uses the returned status value
+	 * (unless the LsfJob's status is Cancelled, which takes priority). 
+	 * If no bjobs entry is found, the LsfJob's current status is returned.
+	 * 
+	 * @param job
+	 * @return
+	 * @throws InternalException
+	 */
 	private JobStatus getStatus( LsfJob job ) throws InternalException{
 		
 		String jobId = job.getId();
+		JobStatus oldStatus = job.getStatus();
 		String owner = job.getBatchUsername();
+		
+		JobStatus status;
+		
 		logger.debug("job " + jobId + " is being run by " + owner);
 
 		String idFileName = getSshIdFileNameFor( owner );
@@ -783,7 +823,9 @@ public class JobManagementBean {
 		ShellCommand sc = new ShellCommand("ssh", "-i", idFileName, owner + "@localhost", "bjobs", "-aw", jobId);
 		if (sc.isError()) {
 			// Astonishingly, "No job found" counts as an error!
-			if( ! "No job found".equals(sc.getStderr())){
+			// ... as does "Job <jobId> is not found", which is what actually appears
+			String expectedMessage = "Job <" + jobId + "> is not found";
+			if( ! expectedMessage.equals(sc.getStderr().trim())){
 				throw new InternalException("Unable to query job (id " + jobId
 						+ ") via bjobs: " + sc.getStderr());
 			}
@@ -792,10 +834,17 @@ public class JobManagementBean {
 		Bjobs bjobs = new Bjobs( sc.getStdout() );
 		Bjobs.Job bjob = bjobs.getJob(jobId);
 		if( bjob == null ){
-			throw new InternalException("Unable to find job (id " + jobId + ") in bjobs" );
+			logger.debug("Unable to find job (id " + jobId + ") in bjobs; return job's last known status (" + oldStatus + ")");
+			status = oldStatus;
+		} else {
+			status = mapStatus( bjob.getStatus() );
+			if( JobStatus.Cancelled.equals(oldStatus) ){
+				logger.debug("Job (id " + jobId + ") has status Cancelled; return this rather than bjobs' status (" + status + ")");
+				status = oldStatus;
+			}
 		}
 		
-		return mapStatus( bjob.getStatus() );
+		return status;
 	}
 
 	/**
@@ -862,7 +911,7 @@ public class JobManagementBean {
 		
 		// If we don't know that the Job has Completed, check the current status, if we can
 		
-		if( ! JobStatus.Completed.equals(job.getStatus())){
+		if( ! isFinished(job.getStatus())){
 			// Get the status of this job.
 			
 			String idFileName = getSshIdFileNameFor( owner );
@@ -881,7 +930,7 @@ public class JobManagementBean {
 			
 				JobStatus status = mapStatus( bjob.getStatus() );
 				logger.debug("Status is " + status);
-				if (! JobStatus.Completed.equals(status)) {
+				if (! isFinished(status)) {
 					throw new ParameterException("LsfJob " + jobId + " is " + status);
 				}
 			} else {
@@ -934,7 +983,7 @@ public class JobManagementBean {
 
 	/**
 	 * cancel() implements the RESTful method cancel/{jobId}.
-	 * It uses the Platform LSF bkill command to kill the specified job.
+	 * It uses the Platform LSF bkill command to kill the specified job, and sets the job status to Cancelled.
 	 * It does not remove any existing job output, nor does it clean up or release the pool user;
 	 * we rely on a subsequent delete request or some future scheduled run of updateJobsFromBjobs
 	 * to do that.
@@ -958,6 +1007,8 @@ public class JobManagementBean {
 		if (sc.isError() && !sc.getStderr().startsWith("Warning")) {
 			throw new ParameterException("Unable to cancel job " + job.getId() + ": " + sc.getStderr());
 		}
+		logger.debug("Setting status of job " + jobId + " to Cancelled");
+		job.setStatus(JobStatus.Cancelled);
 	}
 
 	private void checkCredentials(String sessionId) throws ParameterException {
