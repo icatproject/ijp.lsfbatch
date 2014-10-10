@@ -63,6 +63,12 @@ public class LsfUserPool {
 				free.add(id);
 			}
 		}
+		
+		public void assignUser( String id ){
+			if( free.remove(id) ){
+				assigned.add(id);
+			}
+		}
 	}
 	
 	private Map<String,FamilyPool> familyPools;
@@ -90,15 +96,12 @@ public class LsfUserPool {
 		if( familyPool == null ){
 			throw new InternalException("Unrecognised family " + family);
 		}
-		return familyPool.getUser();
-	}
-	
-	public void freeUser( String family, String id ) throws InternalException{
-		FamilyPool familyPool = familyPools.get(family);
-		if( familyPool == null ){
-			throw new InternalException("Unrecognised family " + family);
+		String user = familyPool.getUser();
+		// Ensure this user is flagged as assigned in any other families that contain it
+		for( FamilyPool familyPool2 : familyPools.values() ){
+			familyPool2.assignUser(user);
 		}
-		familyPool.freeUser(id);
+		return user;
 	}
 	
 	public void freeUser( String id ){
@@ -106,6 +109,10 @@ public class LsfUserPool {
 			// freeUser() does nothing if the FamilyPool does not have that user (or if it's already free)
 			familyPool.freeUser(id);
 		}
+	}
+	
+	public void clear(){
+		familyPools = new HashMap<String,FamilyPool>();
 	}
 
 }
