@@ -89,11 +89,31 @@ public class LsfUserPoolTest {
 		
 		userPool.addLsfUser("family1", "user3", true);
 		
+		// Now get one of the free users
+		
 		try {
 			String user = userPool.getUserForFamily("family1");
 			assertTrue("User should be either user1 or user2", "user1".equals(user) || "user2".equals(user));
 		} catch (InternalException e) {
 			fail("Get user for family1 threw exception: " + e.getMessage() );
+		}
+		
+		// ... and get the other one
+		
+		try {
+			String user = userPool.getUserForFamily("family1");
+			assertTrue("User should be either user1 or user2", "user1".equals(user) || "user2".equals(user));
+		} catch (InternalException e) {
+			fail("Get user for family1 threw exception: " + e.getMessage() );
+		}
+		
+		// All users should now be assigned, so can't get any more
+		
+		try {
+			userPool.getUserForFamily("family1");
+			fail("family1 should have no free users, exception expected");
+		} catch (InternalException e) {
+			assertEquals("Get user for family1 should throw expected exception", e.getMessage(), "No free LSF users at present" );
 		}
 		
 	}
