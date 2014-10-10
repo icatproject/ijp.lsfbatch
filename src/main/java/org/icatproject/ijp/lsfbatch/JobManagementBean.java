@@ -250,6 +250,9 @@ public class JobManagementBean {
 				}
 				
 				if( uncompletedJobs == 0 ){
+					
+					// TODO Restore pool user's files to a pristine state, in case a job has fiddled with them
+					
 					logger.debug("Userid " + poolUserId + " has no uncompleted jobs, so releasing it back to the pool");
 					lsfUserPool.freeUser(poolUserId);
 				}

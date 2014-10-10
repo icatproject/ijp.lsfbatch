@@ -34,35 +34,35 @@ public class BjobsTest {
 			Bjobs bjobs = new Bjobs(dummyOutput);
 			
 			Set<String> jobIds = bjobs.getJobIds();
-			assertEquals(jobIds.size(), 2);
+			assertEquals("There should be two jobs", jobIds.size(), 2);
 			
 			Bjobs.Job job1 = bjobs.getJob( job1Id );
-			assertEquals("scarf334", job1.getUserId() );
-			assertEquals("DONE", job1.getStatus());
-			assertEquals("scarf", job1.getQueue());
-			assertEquals("ui3.scarf.rl.ac.uk", job1.getFromHost());
-			assertEquals("cn223.scarf.rl.ac.uk", job1.getExecHost());
-			assertEquals("test-batchfile", job1.getJobName());
+			assertEquals("job1 userid should be scarf334", "scarf334", job1.getUserId() );
+			assertEquals("job1 status should be DONE", "DONE", job1.getStatus());
+			assertEquals("job1 queue should be scarf", "scarf", job1.getQueue());
+			assertEquals("job1 from-host should be ui3", "ui3.scarf.rl.ac.uk", job1.getFromHost());
+			assertEquals("job1 exec-host should be cn223", "cn223.scarf.rl.ac.uk", job1.getExecHost());
+			assertEquals("job1 name should be test-batchfile", "test-batchfile", job1.getJobName());
 			
 			cal.setTime(job1.getSubmitTime());
-			assertEquals(7, cal.get(Calendar.MONTH));
-			assertEquals(5, cal.get(Calendar.DAY_OF_MONTH));
-			assertEquals(14, cal.get(Calendar.HOUR_OF_DAY));
-			assertEquals(34, cal.get(Calendar.MINUTE));
+			assertEquals("job1 submit Month should be 7", 7, cal.get(Calendar.MONTH));
+			assertEquals("job1 submit Day should be 5", 5, cal.get(Calendar.DAY_OF_MONTH));
+			assertEquals("job1 submit Hour should be 14", 14, cal.get(Calendar.HOUR_OF_DAY));
+			assertEquals("job1 submit Minute should be 34", 34, cal.get(Calendar.MINUTE));
 			
 			Bjobs.Job job2 = bjobs.getJob( job2Id );
-			assertEquals("scarf334", job2.getUserId() );
-			assertEquals("PEND", job2.getStatus());
-			assertEquals("scarf", job2.getQueue());
-			assertEquals("ui3.scarf.rl.ac.uk", job2.getFromHost());
-			assertEquals("cn223.scarf.rl.ac.uk", job2.getExecHost());
-			assertEquals("test-batchfile", job2.getJobName());
+			assertEquals("job2 userid should be scarf334", "scarf334", job2.getUserId() );
+			assertEquals("job2 status should be PEND", "PEND", job2.getStatus());
+			assertEquals("job2 queue should be scarf", "scarf", job2.getQueue());
+			assertEquals("job2 from-host should be ui3", "ui3.scarf.rl.ac.uk", job2.getFromHost());
+			assertEquals("job2 exec-host should be cn223", "cn223.scarf.rl.ac.uk", job2.getExecHost());
+			assertEquals("job2 name should be test-batchfile", "test-batchfile", job2.getJobName());
 			
 			cal.setTime(job2.getSubmitTime());
-			assertEquals(6, cal.get(Calendar.MONTH));
-			assertEquals(15, cal.get(Calendar.DAY_OF_MONTH));
-			assertEquals(9, cal.get(Calendar.HOUR_OF_DAY));
-			assertEquals(6, cal.get(Calendar.MINUTE));
+			assertEquals("job2 submit Month should be 6", 6, cal.get(Calendar.MONTH));
+			assertEquals("job2 submit Day should be 15", 15, cal.get(Calendar.DAY_OF_MONTH));
+			assertEquals("job2 submit Hour should be 9", 9, cal.get(Calendar.HOUR_OF_DAY));
+			assertEquals("job2 submit Minute should be 6", 6, cal.get(Calendar.MINUTE));
 						
 		} catch (InternalException e) {
 			fail("Internal exception: " + e.getMessage() );
@@ -73,8 +73,8 @@ public class BjobsTest {
 	@Test
 	public void noJobsTest(){
 		
-		// It turns out that when no jobs are found, "No job found" etc. appears on stdout, not stdin!
-		// So we really need to test empty stdin.
+		// It turns out that when no jobs are found, "No job found" etc. appears on stderr, not stdout!
+		// So we really need to test empty stdout.
 		
 		String dummyOutput1 = "No job found\n";
 		String dummyOutput2 = "No unfinished job found\n";
@@ -89,7 +89,7 @@ public class BjobsTest {
 			bjobs = new Bjobs(dummyOutput1);
 			
 			jobIds = bjobs.getJobIds();
-			assertEquals(jobIds.size(), 0);
+			assertEquals("There should be no jobs from dummyOutput1", jobIds.size(), 0);
 			
 		} catch( InternalException e ){
 			fail("Internal exception: " + e.getMessage());
@@ -100,7 +100,7 @@ public class BjobsTest {
 			bjobs = new Bjobs(dummyOutput2);
 			
 			jobIds = bjobs.getJobIds();
-			assertEquals(jobIds.size(), 0);
+			assertEquals("There should be no jobs from dummyOutput2", jobIds.size(), 0);
 			
 		} catch( InternalException e ){
 			fail("Internal exception: " + e.getMessage());
@@ -111,7 +111,7 @@ public class BjobsTest {
 			bjobs = new Bjobs(dummyOutput3);
 			
 			jobIds = bjobs.getJobIds();
-			assertEquals(jobIds.size(), 0);
+			assertEquals("There should be no jobs from dummyOutput3", jobIds.size(), 0);
 			
 		} catch( InternalException e ){
 			fail("Internal exception: " + e.getMessage());
@@ -122,7 +122,7 @@ public class BjobsTest {
 			bjobs = new Bjobs(dummyOutput4);
 			
 			jobIds = bjobs.getJobIds();
-			assertEquals(jobIds.size(), 0);
+			assertEquals("There should be no jobs from dummyOutput4", jobIds.size(), 0);
 			
 		} catch( InternalException e ){
 			fail("Internal exception: " + e.getMessage());
