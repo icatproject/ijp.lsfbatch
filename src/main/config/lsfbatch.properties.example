@@ -1,10 +1,13 @@
-icat.url = https://smfisher.esc.rl.ac.uk:8181
+# BR's test ICAT / IDS / IJP installation:
+icat.url = https://sig-23.esc.rl.ac.uk:8181
+# Steve's laptop ICAT:
+# icat.url = https://smfisher.esc.rl.ac.uk:8181
 
 families.list = batch ingest
 families.batch = ijp01 ijp02
 families.ingest = ingest01 ingest02
 
 jobOutputDir = /home/escg/glassfish/jobOutputDir
-lsf.defaultQueue = scarf-rhel6
+lsf.defaultQueue = scarf
 lsf.userPoolBaseDir = /home/escg
 lsf.userOutputDir = jobsOutput

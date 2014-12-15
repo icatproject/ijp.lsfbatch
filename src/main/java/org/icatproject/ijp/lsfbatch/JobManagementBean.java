@@ -511,8 +511,10 @@ public class JobManagementBean {
 		String queueName = lsfDefaultQueue;
 		
 		// For now, use the executable as the job name.  May want to improve on this later.
+		// The executable "should not" contain whitespace,
+		// but the jobName MUST NOT contain whitespace!
 		
-		String jobName = executable;
+		String jobName = executable.replaceAll("\\s+","_");
 		
 		// Create a temporary directory for the (final) output files
 
@@ -626,10 +628,12 @@ public class JobManagementBean {
 	
 	private String getJobId(String stdout) throws InternalException {
 		/* 
-		 * bsub output format is "LsfJob <jobId> is submitted to queue <queueName>.",
+		 * bsub output format is "LsfJob <jobId> is submitted to [default] queue <queueName>.",
 		 * (including the angle brackets).
+		 * Experience shows we shouldn't be too precise about the words!
+		 * Original pattern was "Job <(\\d+)> is submitted to queue <(.+)>\\."
 		 */
-		Pattern p = Pattern.compile("Job <(\\d+)> is submitted to queue <(.+)>\\.");
+		Pattern p = Pattern.compile("Job <(\\d+)> .*");
 		Matcher m = p.matcher(stdout.trim());
 		if( ! m.matches() ){
 			logger.debug("Unable to get JobId for submitted job: bsub output was: " + stdout);
