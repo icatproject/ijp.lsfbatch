@@ -15,7 +15,7 @@ actions, options, arg = getActions()
 props = actions.getGlassfish("lsfbatch-setup.properties", ["dbProperties", "glassfish", "driver", "port"])
 
 prop_name = "lsfbatch.properties"
-prop_list = ["icat.url", "families.list", "jobOutputDir"]
+prop_list = ["families.list", "jobOutputDir"]
 
 if arg in ["CONFIGURE", "INSTALL"]:
     actions.configure(prop_name, prop_list) 

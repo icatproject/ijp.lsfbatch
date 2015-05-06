@@ -8,6 +8,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,8 +36,8 @@ import javax.persistence.EntityManager;
 import javax.persistence.PersistenceContext;
 import javax.xml.namespace.QName;
 
-import org.icatproject.ICAT;
 import org.icatproject.ICATService;
+import org.icatproject.IcatExceptionType;
 import org.icatproject.IcatException_Exception;
 import org.icatproject.ijp.batch.BatchJson;
 import org.icatproject.ijp.batch.JobStatus;
@@ -56,8 +57,6 @@ import org.slf4j.LoggerFactory;
 @Stateless
 public class JobManagementBean {
 
-	private ICAT icat;
-
 	private String defaultFamily;
 	private Map<String, List<String>> families = new HashMap<>();
 	private LsfUserPool lsfUserPool;
@@ -69,6 +68,8 @@ public class JobManagementBean {
 	private String lsfUserOutputDir;
 	
 	private final static String chars = "abcdefghijklmnpqrstuvwxyz";
+
+	private QName qName = new QName("http://icatproject.org", "ICATService");
 
 	@PostConstruct
 	void init() {
@@ -125,16 +126,6 @@ public class JobManagementBean {
 			lsfUserPoolBaseDir = props.getString("lsf.userPoolBaseDir");
 			lsfUserOutputDir = props.getString("lsf.userOutputDir");
 			
-			if (props.has("javax.net.ssl.trustStore")) {
-				System.setProperty("javax.net.ssl.trustStore",
-						props.getProperty("javax.net.ssl.trustStore"));
-			}
-			URL icatUrl = props.getURL("icat.url");
-			icatUrl = new URL(icatUrl, "ICATService/ICAT?wsdl");
-			QName qName = new QName("http://icatproject.org", "ICATService");
-			ICATService service = new ICATService(icatUrl, qName);
-			icat = service.getICATPort();
-
 			logger.info("Set up lsfbatch with default family " + defaultFamily);
 		} catch (Exception e) {
 			String msg = e.getClass() + " reports " + e.getMessage();
@@ -381,7 +372,7 @@ public class JobManagementBean {
 	 * @throws InternalException if the file exists but access fails
 	 * @throws ParameterException if no file of the chosen output type can be found
 	 */
-	public InputStream getJobOutput(String sessionId, String jobId, OutputType outputType)
+	public InputStream getJobOutput(String jobId, OutputType outputType, String sessionId, String icatUrl)
 			throws SessionException, ForbiddenException, InternalException, ParameterException {
 		
 		/* 
@@ -397,7 +388,7 @@ public class JobManagementBean {
 		
 		logger.info("getJobOutput called with sessionId:" + sessionId + " jobId:" + jobId
 				+ " outputType:" + outputType);
-		LsfJob job = getJob(sessionId, jobId);
+		LsfJob job = getJob(jobId, sessionId, icatUrl);
 		InputStream is;
 
 		String jobFilename = job.getId() + "." + (outputType == OutputType.STANDARD_OUTPUT ? "log" : "err");
@@ -494,7 +485,7 @@ public class JobManagementBean {
 	 * @throws InternalException
 	 * @throws SessionException
 	 */
-	public String submitBatch(String userName, String executable, List<String> parameters,
+	private String submitBatch(String userName, String executable, List<String> parameters,
 			String family) throws ParameterException, InternalException, SessionException {
 
 		if (family == null) {
@@ -743,23 +734,25 @@ public class JobManagementBean {
 	 * @throws InternalException
 	 * @throws ParameterException
 	 */
-	public String submitInteractive(String userName, String executable, List<String> parameters,
+	private String submitInteractive(String userName, String executable, List<String> parameters,
 			String family) throws InternalException, ParameterException {
 		throw new ParameterException("Interactive jobs are not currently supported by LsfBatch");
-		// TODO must improve this ...
-		// Path interactiveScriptFile = createScript(parameters, executable, null);
-		// Account account = machineEJB.prepareMachine(userName, executable, parameters,
-		// interactiveScriptFile);
-		// return account.getUserName() + " " + account.getPassword() + " " + account.getHost();
+		// TODO get interactive sessions working on Platform LSF
 	}
 
-	private String getUserName(String sessionId) throws SessionException, ParameterException {
+	private String getUserName(String sessionId, String icatUrl) throws SessionException, ParameterException {
 		try {
-			checkCredentials(sessionId);
-			return icat.getUserName(sessionId);
+			checkCredentials(sessionId, icatUrl);
+			ICATService service = new ICATService(new URL(new URL(icatUrl), "ICATService/ICAT?wsdl"), qName);
+			return service.getICATPort().getUserName(sessionId);
 		} catch (IcatException_Exception e) {
-			throw new SessionException("IcatException " + e.getFaultInfo().getType() + " "
-					+ e.getMessage());
+			if (e.getFaultInfo().getType() == IcatExceptionType.SESSION) {
+				throw new SessionException("IcatException " + e.getFaultInfo().getType() + " " + e.getMessage());
+			} else {
+				throw new ParameterException("IcatException " + e.getFaultInfo().getType() + " " + e.getMessage());
+			}
+		} catch (MalformedURLException e) {
+			throw new ParameterException("Bad URL " + e.getMessage());
 		}
 	}
 
@@ -767,16 +760,17 @@ public class JobManagementBean {
 	 * List the ids of those jobs owned by the session user.
 	 * 
 	 * @param sessionId
+	 * @param icatUrl
 	 * @return Json array of job-ids
 	 * @throws SessionException
 	 * @throws ParameterException
 	 * @throws InternalException
 	 */
-	public String list(String sessionId) throws SessionException,
+	public String list(String sessionId, String icatUrl) throws SessionException,
 			ParameterException, InternalException {
 		logger.info("listStatus called with sessionId:" + sessionId);
 
-		String username = getUserName(sessionId);
+		String username = getUserName(sessionId, icatUrl);
 		List<String> jobs = entityManager
 				.createNamedQuery(LsfJob.ID_BY_USERNAME, String.class)
 				.setParameter("username", username).getResultList();
@@ -789,16 +783,17 @@ public class JobManagementBean {
 	 * 
 	 * @param jobId
 	 * @param sessionId
+	 * @param icatUrl
 	 * @return
 	 * @throws SessionException
 	 * @throws ForbiddenException
 	 * @throws ParameterException
 	 * @throws InternalException
 	 */
-	public String getStatus(String jobId, String sessionId) throws SessionException,
+	public String getStatus(String jobId, String sessionId, String icatUrl) throws SessionException,
 			ForbiddenException, ParameterException, InternalException {
 		logger.info("getStatus called with sessionId:" + sessionId + " jobId:" + jobId);
-		LsfJob job = getJob(sessionId, jobId);
+		LsfJob job = getJob(jobId, sessionId, icatUrl);
 		
 		JobStatus status = getStatus( job );
 		
@@ -879,9 +874,9 @@ public class JobManagementBean {
 		return outStatus;
 	}
 
-	private LsfJob getJob(String sessionId, String jobId) throws SessionException, ForbiddenException,
+	private LsfJob getJob(String jobId, String sessionId, String icatUrl) throws SessionException, ForbiddenException,
 			ParameterException {
-		String username = getUserName(sessionId);
+		String username = getUserName(sessionId, icatUrl);
 		if (jobId == null) {
 			throw new ParameterException("No jobId was specified");
 		}
@@ -899,18 +894,19 @@ public class JobManagementBean {
 	 * We assume that the associated pool user can now be released back to the pool
 	 * (this assumes that each pool user only runs a single job at a time).
 	 * 
-	 * @param sessionId
 	 * @param jobId
+	 * @param sessionId
+	 * @param icatUrl
 	 * @throws SessionException
 	 * @throws ForbiddenException
 	 * @throws InternalException
 	 * @throws ParameterException
 	 */
-	public void delete(String sessionId, String jobId) throws SessionException, ForbiddenException,
+	public void delete(String jobId, String sessionId, String icatUrl) throws SessionException, ForbiddenException,
 			InternalException, ParameterException {
 		
 		logger.info("delete called with sessionId:" + sessionId + " jobId:" + jobId);
-		LsfJob job = getJob(sessionId, jobId);
+		LsfJob job = getJob(jobId, sessionId, icatUrl);
 		String owner = job.getBatchUsername();
 		logger.debug("job " + jobId + " is being run by " + owner);
 		
@@ -995,18 +991,19 @@ public class JobManagementBean {
 	 * we rely on a subsequent delete request or some future scheduled run of updateJobsFromBjobs
 	 * to do that.
 	 * 
-	 * @param sessionId
 	 * @param jobId
+	 * @param sessionId
+	 * @param icatUrl
 	 * @throws SessionException
 	 * @throws ForbiddenException
 	 * @throws InternalException
 	 * @throws ParameterException
 	 */
-	public void cancel(String sessionId, String jobId) throws SessionException, ForbiddenException,
+	public void cancel(String jobId, String sessionId, String icatUrl) throws SessionException, ForbiddenException,
 			InternalException, ParameterException {
 		
 		logger.info("cancel called with sessionId:" + sessionId + " jobId:" + jobId);
-		LsfJob job = getJob(sessionId, jobId);
+		LsfJob job = getJob(jobId, sessionId, icatUrl);
 		String owner = job.getBatchUsername();
 		logger.debug("job " + jobId + " is being run by " + owner);
 		String idFileName = getSshIdFileNameFor( owner );
@@ -1018,9 +1015,12 @@ public class JobManagementBean {
 		job.setStatus(JobStatus.Cancelled);
 	}
 
-	private void checkCredentials(String sessionId) throws ParameterException {
+	private void checkCredentials(String sessionId, String icatUrl) throws ParameterException {
 		if (sessionId == null) {
 			throw new ParameterException("No sessionId was specified");
+		}
+		if (icatUrl == null) {
+			throw new ParameterException("No ICAT url was specified");
 		}
 	}
 
@@ -1028,23 +1028,24 @@ public class JobManagementBean {
 	 * submit() implements the RESTful method submit.
 	 * Note that only batch submission is available at present.
 	 * 
-	 * @param sessionId
 	 * @param executable
 	 * @param parameters
 	 * @param family
 	 * @param interactive
+	 * @param sessionId
+	 * @param icatUrl
 	 * @return
 	 * @throws InternalException
 	 * @throws SessionException
 	 * @throws ParameterException
 	 */
-	public String submit(String sessionId, String executable, List<String> parameters,
-			String family, boolean interactive) throws InternalException, SessionException,
+	public String submit(String executable, List<String> parameters,
+			String family, boolean interactive, String sessionId, String icatUrl) throws InternalException, SessionException,
 			ParameterException {
 		logger.info("submit called with sessionId:" + sessionId + " executable:" + executable
 				+ " parameters:" + parameters + " family:" + family + " :" + " interactive:"
 				+ interactive);
-		String userName = getUserName(sessionId);
+		String userName = getUserName(sessionId, icatUrl);
 		String jobId;
 		if (interactive) {
 			jobId = submitInteractive(userName, executable, parameters, family);
@@ -1063,18 +1064,19 @@ public class JobManagementBean {
 	 * containing a "time" field.
 	 * At present, only batch jobs are supported; further, the estimate is wildly optimistic!
 	 * 
-	 * @param sessionId
 	 * @param executable
 	 * @param parameters
 	 * @param family
 	 * @param interactive
+	 * @param sessionId
+	 * @param icatUrl
 	 * @return
 	 * @throws SessionException
 	 * @throws ParameterException
 	 */
-	public String estimate(String sessionId, String executable, List<String> parameters,
-			String family, boolean interactive) throws SessionException, ParameterException {
-		String userName = getUserName(sessionId);
+	public String estimate(String executable, List<String> parameters,
+			String family, boolean interactive, String sessionId, String icatUrl) throws SessionException, ParameterException {
+		String userName = getUserName(sessionId, icatUrl);
 
 		int time;
 		if (interactive) {
